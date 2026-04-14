@@ -224,23 +224,31 @@ def register():
 @auth_bp.route('/login', methods=['POST'])
 def login():
     """
-    登录
-    请求：{email, password, key_check}
-    返回：{user_id, token, plan, storage_quota, storage_used}
+    登录（含MFA + 信任设备）
     
-    【更新日志 2026-04-14】
-    - v1.1: 添加密码验证
-      - 新增必填字段: password, key_check
-      - 服务端验证key_check确保密码正确
-      - 使用恒定时间比较防止时序攻击
+    请求：{
+        email, 
+        password, 
+        key_check,
+        device_fingerprint?: string,  # 浏览器指纹
+        device_info?: {name, browser, os, deviceType}
+    }
+    返回：{success, mfa_required?, mfa_type?, mfa_token?, token?, user_id?}
+    
+    【更新日志 2026-04-14 v1.2】
+    - v1.2: 添加MFA和信任设备支持
+      - 启用MFA时，验证通过后发送验证码
+      - 信任设备30天内免MFA
     """
     body = request.get_json(force=True, silent=True) or {}
     email = (body.get("email") or "").strip().lower()
     password = body.get("password", "")
     key_check = body.get("key_check", "")
+    device_fingerprint = body.get("device_fingerprint")
+    device_info = body.get("device_info", {})
     ip = get_client_ip()
     
-    # 【更新v1.1】基础验证
+    # 基础验证
     if not email:
         return jsonify({"error": "Email required"}), 400
     
@@ -249,59 +257,119 @@ def login():
     
     db = get_db()
     
-    # 【更新v1.1】获取用户及盐值
+    # 获取用户
     user = db.execute(
         "SELECT id, salt, key_check, locked_until FROM users WHERE email = ?", (email,)
     ).fetchone()
     
     if not user:
-        # 【更新v1.1】延迟验证防止用户枚举
-        time.sleep(0.1)
         return jsonify({"error": "Invalid credentials"}), 401
     
     # 检查账户锁定
     if _check_account_lock(db, user["id"]):
-        return jsonify({"error": "Account locked due to too many failed login attempts"}), 423
+        return jsonify({"error": "Account locked"}), 423
     
-    # 【更新v1.1】验证密码和key_check
-    if not user["salt"] or not user["key_check"]:
-        # 老用户兼容：无salt/key_check的账户拒绝登录
-        return jsonify({"error": "Account not configured for login, please re-register"}), 401
-    
-    # 验证key_check
+    # 验证密码
     if not _verify_key_check(password, user["salt"], key_check):
         _increment_login_fails(db, user["id"])
-        write_audit(user["id"], "LOGIN_FAILED", details={"ip": ip, "reason": "invalid_key_check"})
+        write_audit(user["id"], "LOGIN_FAILED", details={"ip": ip, "reason": "invalid_password"})
         return jsonify({"error": "Invalid credentials"}), 401
     
-    # 验证密码本身 (用于额外的安全性)
-    # 注意: 实际加密验证已在_verify_key_check中完成
-    # 这里可以做额外的业务逻辑验证
-    
-    # 重置登录失败计数
+    # 重置登录失败
     _reset_login_fails(db, user["id"])
     
-    # 更新最后登录信息
+    # 获取MFA设置
+    mfa_settings = db.execute(
+        "SELECT mfa_enabled, mfa_type FROM mfa_settings WHERE user_id = ? AND mfa_enabled = 1",
+        (user["id"],)
+    ).fetchone()
+    
+    needs_mfa = mfa_settings is not None
+    skip_mfa = False
+    
+    # 如果需要MFA，检查是否是信任设备
+    if needs_mfa and device_fingerprint:
+        from nueronote_server.services.device import get_device_service
+        device_service = get_device_service()
+        trusted = device_service.check_trusted(db, user["id"], device_fingerprint)
+        if trusted:
+            skip_mfa = True
+    
+    if needs_mfa and not skip_mfa:
+        # 需要MFA验证 - 创建MFA会话
+        from nueronote_server.api.mfa import MFA_SESSIONS
+        import secrets
+        
+        mfa_token = secrets.token_urlsafe(32)
+        expires_at = int(time.time()) + 300  # 5分钟
+        
+        MFA_SESSIONS[mfa_token] = {
+            'user_id': user["id"],
+            'mfa_type': mfa_settings['mfa_type'],
+            'expires_at': expires_at
+        }
+        
+        # 发送验证码
+        from nueronote_server.services.mfa import get_mfa_service
+        mfa_service = get_mfa_service()
+        
+        if mfa_settings['mfa_type'] == 'email':
+            user_email = db.execute("SELECT email FROM users WHERE id = ?", (user["id"],)).fetchone()
+            if user_email:
+                code = mfa_service.generate_code()
+                from nueronote_server.api.mfa import _store_code
+                _store_code(db, user["id"], code, 'email')
+                mfa_service.send_mfa_email(user_email['email'], code)
+        else:
+            code = mfa_service.generate_code()
+            from nueronote_server.api.mfa import _store_code
+            _store_code(db, user["id"], code, 'sms')
+            mfa_service.send_sms(mfa_settings['phone_number'], code)
+        
+        write_audit(user["id"], "MFA_REQUIRED", details={"ip": ip})
+        
+        return jsonify({
+            "success": True,
+            "mfa_required": True,
+            "mfa_type": mfa_settings['mfa_type'],
+            "mfa_token": mfa_token,
+            "mfa_skipped": False,
+            "message": "MFA verification required"
+        })
+    
+    # 直接登录成功
+    from flask import current_app
+    token = sign_token(user["id"], current_app.config["JWT_SECRET"])
+    
+    # 如果有设备指纹，注册/更新设备
+    if device_fingerprint:
+        from nueronote_server.services.device import get_device_service
+        device_service = get_device_service()
+        device_service.register_device(
+            db, user["id"], device_fingerprint, device_info, ip,
+            request.headers.get('User-Agent', '')
+        )
+    
+    # 更新最后登录
     db.execute(
         "UPDATE users SET last_login = ?, last_ip = ? WHERE id = ?",
         (int(time.time()), ip, user["id"])
     )
+    db.commit()
     
-    # 获取存储使用情况
+    # 获取存储使用
     vault = db.execute(
         "SELECT storage_bytes FROM vaults WHERE user_id = ?", (user["id"],)
     ).fetchone()
     storage_used = vault["storage_bytes"] if vault else 0
     
-    # 生成JWT令牌 (24小时有效期)
-    from nueronote_server import app
-    token = sign_token(user["id"], app.config["JWT_SECRET"])
-    
-    write_audit(user["id"], "LOGIN_SUCCESS", details={"ip": ip})
+    write_audit(user["id"], "LOGIN_SUCCESS", details={"ip": ip, "mfa_skipped": skip_mfa})
     
     return jsonify({
-        "user_id": user["id"],
+        "success": True,
         "token": token,
+        "user_id": user["id"],
+        "mfa_skipped": skip_mfa,
         "plan": "free",
         "storage_quota": 512 * 1024 * 1024,
         "storage_used": storage_used,

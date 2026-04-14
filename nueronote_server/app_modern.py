@@ -33,6 +33,8 @@ from nueronote_server.api.sync import sync_bp
 from nueronote_server.api.cloud import cloud_bp
 from nueronote_server.api.account import account_bp
 from nueronote_server.api.core import core_bp
+from nueronote_server.api.mfa import mfa_bp  # MFA v1.2
+from nueronote_server.api.device import device_bp  # 设备管理 v1.2
 # 其他蓝图将在后续添加
 
 # 配置日志
@@ -167,6 +169,10 @@ def register_blueprints(app):
     
     # 账户管理API
     app.register_blueprint(account_bp, url_prefix='/api/v1/account')
+    
+    # MFA和设备管理 v1.2
+    app.register_blueprint(mfa_bp, url_prefix='/api/v1/mfa')
+    app.register_blueprint(device_bp, url_prefix='/api/v1/device')
     
     logger.info("API蓝图注册完成，共注册6个蓝图")
     logger.info(f"  - {core_bp.name}: {core_bp.url_prefix or '/'}")
