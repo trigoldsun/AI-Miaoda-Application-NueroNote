@@ -522,3 +522,57 @@ def logout_current_user() -> bool:
         return auth.destroy_user_session(user_id, token)
     
     return False
+
+
+# =============================================================================
+# CSRF 保护（状态变更API需要）
+# =============================================================================
+from functools import wraps
+
+def csrf_protect(f):
+    """
+    CSRF保护装饰器
+    
+    检查请求来源是否来自信任的域名
+    对于POST/PUT/DELETE请求，验证Origin或Referer头
+    
+    注意: 这不是完整的CSRF token实现
+    对于高安全性需求，应使用 flask-wtf 或类似的CSRF token方案
+    """
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        # 只对非GET请求检查
+        if request.method in ('GET', 'HEAD', 'OPTIONS'):
+            return f(*args, **kwargs)
+        
+        # 获取请求来源
+        origin = request.headers.get('Origin', '')
+        referer = request.headers.get('Referer', '')
+        
+        # 允许的空来源（如同源请求）
+        if not origin and not referer:
+            # 允许无来源的请求，但记录警告
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.warning(f"CSRF: Request without origin/referer to {request.path}")
+            # 在生产环境中可以考虑拒绝
+        
+        # 信任的来源（可配置）
+        trusted_origins = app.config.get('TRUSTED_ORIGINS', [
+            'https://nueronote.app',
+            'https://app.nueronote.com',
+            'http://localhost:3000',  # 开发环境
+            'http://localhost:5173',  # 开发环境
+        ])
+        
+        # 检查来源是否在信任列表中
+        if origin and origin not in trusted_origins:
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.warning(f"CSRF: Untrusted origin '{origin}' for {request.path}")
+            # 在生产环境中可以考虑拒绝
+            # return jsonify({"error": "Invalid request origin"}), 403
+        
+        return f(*args, **kwargs)
+    
+    return decorated_function

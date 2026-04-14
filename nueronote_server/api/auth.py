@@ -194,7 +194,8 @@ def register():
             (user_id, email, password, salt, key_check, now, now)
         )
     except Exception as e:
-        return jsonify({"error": f"Database error: {str(e)}"}), 500
+        import logging; logger = logging.getLogger(__name__); logger.error(f"Database error in register: {str(e)}")
+        return jsonify({"error": "Database operation failed. Please try again later."}), 500
     
     # 初始化vault
     db.execute(
