@@ -999,10 +999,12 @@ function createBlockEl(block) {
   var placeholder = getBlockPlaceholder(type);
   var isHeading = type === 'h1' || type === 'h2' || type === 'h3';
   var displayContent = block.content || '';
-  
-  // Render wikilinks
-  displayContent = displayContent.replace(/\[\[([^\]]+)\]\]/g, '<a href="#" onclick="openByTitle(\'$1\');return false" style="color:var(--accent)">[[$1]]</a>');
-  
+
+  // Render wikilinks 【安全修复 v1.2】HTML转义防止XSS
+  displayContent = displayContent.replace(/\[\[([^\]]+)\]\]/g, function(match, title) {
+    return '<a href="#" onclick="openByTitle(\\'' + escHtml(title) + '\\');return false" style="color:var(--accent)">[[' + escHtml(title) + ']]</a>';
+  });
+
   el.innerHTML = 
     '<span class="drag" title="\u62d6\u62fd">&#8942;&#8942;</span>' +
     '<' + (isHeading ? 'b' : 'div') + ' class="content"' +
@@ -1023,10 +1025,12 @@ function createBlockEl(block) {
     block.content = text;
     block.updated = Date.now();
     
-    // Highlight wikilinks
+    // Highlight wikilinks 【安全修复 v1.2】HTML转义防止XSS
     var html = text
       .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
-      .replace(/\[\[([^\]]+)\]\]/g, '<a href="#" onclick="openByTitle(\'$1\');return false" style="color:var(--accent)">[[$1]]</a>');
+      .replace(/\[\[([^\]]+)\]\]/g, function(match, title) {
+        return '<a href="#" onclick="openByTitle(\\'' + escHtml(title) + '\\');return false" style="color:var(--accent)">[[' + escHtml(title) + ']]</a>';
+      });
     var selection = window.getSelection();
     var offset = selection ? selection.focusOffset : text.length;
     e.target.innerHTML = html;

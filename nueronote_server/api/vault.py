@@ -105,17 +105,22 @@ def put_vault():
 
     vault_bytes = len(json.dumps(vault_json).encode())
 
-    # 配额检查
+    # 配额检查 【安全修复 v1.2 - 计算总使用量】
     db = get_db()
     user = db.execute(
-        "SELECT storage_quota FROM users WHERE id = ?", (g.user_id,)
+        "SELECT storage_quota, storage_used FROM users WHERE id = ?", (g.user_id,)
     ).fetchone()
-    if user and vault_bytes > user["storage_quota"]:
-        return jsonify({
-            "error": "Storage quota exceeded",
-            "quota": user["storage_quota"],
-            "required": vault_bytes,
-        }), 507
+    if user:
+        # 计算总使用量 = 当前vault大小 + 已使用存储
+        total_usage = vault_bytes + (user["storage_used"] or 0)
+        if total_usage > user["storage_quota"]:
+            return jsonify({
+                "error": "Storage quota exceeded",
+                "quota": user["storage_quota"],
+                "current_usage": user["storage_used"] or 0,
+                "required": vault_bytes,
+                "total_after_upload": total_usage,
+            }), 507
 
     now = int(time.time() * 1000)
 

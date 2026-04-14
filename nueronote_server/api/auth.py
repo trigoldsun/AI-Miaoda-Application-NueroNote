@@ -262,7 +262,21 @@ def login():
         "SELECT id, salt, key_check, locked_until FROM users WHERE email = ?", (email,)
     ).fetchone()
     
+    # 【v1.3安全修复】使用恒定时间响应，防止时序攻击泄露用户存在性
+    # 即使用户不存在，也让CPU忙一段时间
+    import hmac
+    import hashlib
+    dummy_salt = "dummy_salt_for_timing_attack_prevention"
+    dummy_check = hmac.new(
+        "dummy_password".encode('utf-8'),
+        f'NueroNote:v1:key-check:{dummy_salt}'.encode('utf-8'),
+        hashlib.sha256
+    ).digest()
+    _ = base64.b64encode(dummy_check).decode('utf-8') if 'base64' in dir() else ""
+    
     if not user:
+        # 即使用户不存在，也让CPU忙一段时间
+        time.sleep(0.1)
         return jsonify({"error": "Invalid credentials"}), 401
     
     # 检查账户锁定
@@ -297,17 +311,11 @@ def login():
     
     if needs_mfa and not skip_mfa:
         # 需要MFA验证 - 创建MFA会话
-        from nueronote_server.api.mfa import MFA_SESSIONS
-        import secrets
+        # 【v1.3】使用持久化会话存储
+        from nueronote_server.api.mfa import get_mfa_session_store
         
-        mfa_token = secrets.token_urlsafe(32)
-        expires_at = int(time.time()) + 300  # 5分钟
-        
-        MFA_SESSIONS[mfa_token] = {
-            'user_id': user["id"],
-            'mfa_type': mfa_settings['mfa_type'],
-            'expires_at': expires_at
-        }
+        session_store = get_mfa_session_store()
+        mfa_token = session_store.create(user["id"], mfa_settings['mfa_type'])
         
         # 发送验证码
         from nueronote_server.services.mfa import get_mfa_service

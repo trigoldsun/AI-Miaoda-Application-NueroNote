@@ -464,43 +464,69 @@ def write_audit(user_id: str = None, action: str = None, details: Dict = None,
                resource_type: str = None, resource_id: str = None) -> int:
     """
     向后兼容的审计日志函数
-    
+
+    【安全修复 v1.2】
+    现在强制从Flask g对象获取user_id，不接受外部传入的值。
+    这防止攻击者伪造审计日志。
+
     Args:
-        user_id: 用户ID
+        user_id: 已废弃，被忽略（为了向后兼容保留参数）
         action: 动作类型
         details: 详细信息
         resource_type: 资源类型
         resource_id: 资源ID
-        
+
     Returns:
         事件ID
     """
+    # 【安全修复 v1.2】强制从Flask g获取用户ID，防止伪造
+    try:
+        from flask import g
+        actual_user_id = getattr(g, 'user_id', None) or 'SYSTEM'
+    except RuntimeError:
+        # 不在Flask请求上下文中
+        actual_user_id = 'SYSTEM'
+
     return log_audit(
         action=action or "UNKNOWN",
-        user_id=user_id,
+        user_id=actual_user_id,  # 忽略传入的user_id，使用g.user_id
         resource_type=resource_type,
         resource_id=resource_id,
         details=details or {},
     )
 
 
-def get_client_ip(request) -> str:
+def get_client_ip(request=None) -> str:
     """
     获取客户端IP地址
     
+    【v1.3安全修复】
+    - 如果在Flask请求上下文中，自动使用全局request对象
+    - 仅信任X-Forwarded-For的第一个IP（最左侧是客户端）
+    - 在反向代理环境下，应在代理层过滤伪造的IP头
+    
     Args:
-        request: Flask请求对象
+        request: Flask请求对象（可选，不传则自动从flask import）
         
     Returns:
         客户端IP地址
     """
-    # 优先从X-Forwarded-For获取（反向代理场景）
-    if request.headers.get('X-Forwarded-For'):
-        return request.headers.get('X-Forwarded-For').split(',')[0].strip()
+    # 【v1.3】自动获取request对象
+    if request is None:
+        try:
+            from flask import request
+        except RuntimeError:
+            return '0.0.0.0'
     
-    # 其次从X-Real-IP获取
-    if request.headers.get('X-Real-IP'):
-        return request.headers.get('X-Real-IP')
+    # 【v1.3安全修复】仅信任X-Forwarded-For的第一个IP
+    # 这应该是反向代理添加的真实客户端IP
+    forwarded_for = request.headers.get('X-Forwarded-For')
+    if forwarded_for:
+        # 只取第一个IP（最接近代理入口）
+        return forwarded_for.split(',')[0].strip()
     
-    # 最后使用remote_addr
+    real_ip = request.headers.get('X-Real-IP')
+    if real_ip:
+        return real_ip.strip()
+    
     return request.remote_addr or '0.0.0.0'

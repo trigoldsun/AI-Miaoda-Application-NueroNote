@@ -1,2 +1,41 @@
+# NueroNote Server Dependencies
+# ================================
+# 安全修复 v1.2 - 添加完整的安全依赖
+
+# Web框架
 flask>=3.0.0
 werkzeug>=3.0.0
+
+# JWT 认证 【新增 v1.2】
+PyJWT>=2.8.0
+
+# 密码哈希 【新增 v1.2】
+bcrypt>=4.1.0
+
+# 加密支持 【新增 v1.2】
+cryptography>=41.0.0
+
+# 数据验证 【新增 v1.2】
+pydantic>=2.5.0
+email-validator>=2.1.0
+
+# 数据库
+# sqlite3 (内置)
+# psycopg2-binary>=2.9.9  # PostgreSQL支持，按需安装
+# pymysql>=1.1.0          # MySQL支持，按需安装
+
+# Redis 缓存 【新增 v1.2】
+redis>=5.0.0
+
+# 速率限制 【新增 v1.2】
+flask-limiter>=3.5.0
+
+# CORS 支持 【新增 v1.2】
+flask-cors>=4.0.0
+
+# 生产服务器 【新增 v1.2】
+gunicorn>=21.2.0
+
+# 开发/测试依赖
+# pytest>=7.4.0
+# pytest-cov>=4.1.0

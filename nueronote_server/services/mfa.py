@@ -25,6 +25,8 @@ class MFAService:
     CODE_EXPIRY_MINUTES = 5
     MAX_ATTEMPTS = 3
     MAX_BACKUP_CODES = 10
+    # 【v1.3】备份码哈希盐值
+    _backup_salt = "NueroNote:v1.3:mfa-backup-code"
     
     def __init__(self):
         self.cache = None
@@ -34,8 +36,14 @@ class MFAService:
         return ''.join([str(secrets.randbelow(10)) for _ in range(self.CODE_LENGTH)])
     
     def hash_code(self, code: str) -> str:
-        """哈希验证码"""
-        return hashlib.sha256(code.encode()).hexdigest()[:32]
+        """
+        【v1.3安全修复】使用HMAC哈希验证码，防止彩虹表攻击
+        """
+        return hmac.new(
+            self._backup_salt.encode('utf-8'),
+            code.encode('utf-8'),
+            hashlib.sha256
+        ).hexdigest()[:32]
     
     def verify_code(self, code: str, stored_hash: str) -> bool:
         """验证验证码（恒定时间比较）"""

@@ -351,17 +351,44 @@ else:
         max_login_fails: int = 5
         lockout_minutes: int = 15
 
+        # 禁止使用的弱密钥列表 【安全修复 v1.2】
+        WEAK_SECRETS = {
+            "changeme", "changeme-jwt-secret", "changeme-jwt-secret-in-production",
+            "secret", "secret-key", "jwt-secret", "your-secret-key",
+            "password", "123456", "000000", "admin", "root"
+        }
+
+        def _is_weak_secret(self, key: str) -> bool:
+            """检查密钥是否为弱密钥"""
+            key_lower = key.lower()
+            if key_lower in self.WEAK_SECRETS:
+                return True
+            if "changeme" in key_lower or len(key) < 32:
+                return True
+            return False
+
         def __post_init__(self):
+            is_production = os.environ.get("NN_DEBUG", "false").lower() != "true"
+
+            # Secret Key 检查
             if not self.secret_key:
-                if os.environ.get("NN_DEBUG", "false").lower() == "true":
+                if not is_production:
                     self.secret_key = secrets.token_urlsafe(32)
                     print("⚠️  警告:使用临时生成的SECRET_KEY,生产环境必须设置NN_SECRET_KEY环境变量")
                 else:
                     raise ValueError("生产环境必须设置NN_SECRET_KEY环境变量")
+            elif is_production and self._is_weak_secret(self.secret_key):
+                raise ValueError(f"生产环境禁止使用弱密钥! 请设置至少32字符的NN_SECRET_KEY")
+
+            # JWT Secret 检查
             if not self.jwt_secret:
-                self.jwt_secret = secrets.token_urlsafe(32)
-                if os.environ.get("NN_DEBUG", "false").lower() != "true":
+                if not is_production:
+                    self.jwt_secret = secrets.token_urlsafe(32)
                     print("⚠️  警告:使用临时生成的JWT_SECRET,建议设置NN_JWT_SECRET环境变量")
+                else:
+                    raise ValueError("生产环境必须设置NN_JWT_SECRET环境变量")
+            elif is_production and self._is_weak_secret(self.jwt_secret):
+                raise ValueError(f"生产环境禁止使用弱密钥! 请设置至少32字符的NN_JWT_SECRET")
 
     @dataclass
     class StorageConfig:

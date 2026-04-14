@@ -2,7 +2,12 @@
 # -*- coding: utf-8 -*-
 """
 NueroNote MFA API
-【更新日志 2026-04-14 v1.2】
+【更新日志 2026-04-14 v1.3】
+
+修复:
+- P0: MFA会话持久化 (Redis/数据库存储)
+- P0: MFA尝试次数限制 (防暴力破解)
+- P0: MFA过期会话自动清理
 
 路由:
 - POST /api/v1/mfa/setup       - 启用MFA
@@ -18,6 +23,7 @@ from functools import wraps
 import json
 import time
 import secrets
+import logging
 
 from nueronote_server.database import get_db
 from nueronote_server.services.mfa import get_mfa_service
@@ -26,9 +32,277 @@ from nueronote_server.utils.jwt import verify_token, sign_token
 from nueronote_server.utils.audit import write_audit, get_client_ip
 
 mfa_bp = Blueprint('mfa', __name__, url_prefix='/api/v1/mfa')
+logger = logging.getLogger(__name__)
 
-# MFA会话存储（生产环境应使用Redis）
-MFA_SESSIONS = {}
+# ============================================================================
+# MFA会话存储 (v1.3 - 持久化存储)
+# ============================================================================
+
+class MFASessionStore:
+    """
+    MFA会话存储 - 支持Redis和数据库两种后端
+    
+    【安全修复 v1.3】
+    - 使用数据库持久化存储，重启不丢失
+    - 自动过期清理机制
+    - 尝试次数限制
+    """
+    
+    # 尝试次数限制
+    MAX_VERIFY_ATTEMPTS = 5
+    # 会话有效期（秒）
+    SESSION_TTL = 300  # 5分钟
+    # 冷却时间（秒）- 超过尝试次数后
+    COOLDOWN_TTL = 300  # 5分钟
+    
+    def __init__(self):
+        self._use_db = True
+        self._init_store()
+    
+    def _init_store(self):
+        """初始化存储后端"""
+        try:
+            from nueronote_server.cache import get_cache
+            cache = get_cache()
+            if cache:
+                self._cache = cache
+                self._use_db = False
+                logger.info("MFA会话存储: Redis后端")
+                return
+        except Exception:
+            pass
+        
+        logger.info("MFA会话存储: 数据库后端")
+        self._use_db = True
+        self._ensure_table()
+    
+    def _ensure_table(self):
+        """确保MFA会话表存在"""
+        db = get_db()
+        db.execute("""
+            CREATE TABLE IF NOT EXISTS mfa_sessions (
+                session_token TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                mfa_type TEXT NOT NULL,
+                expires_at INTEGER NOT NULL,
+                attempts INTEGER DEFAULT 0,
+                locked_until INTEGER DEFAULT 0,
+                created_at INTEGER NOT NULL
+            )
+        """)
+        db.execute("""
+            CREATE INDEX IF NOT EXISTS idx_mfa_user ON mfa_sessions(user_id)
+        """)
+        db.execute("""
+            CREATE INDEX IF NOT EXISTS idx_mfa_expires ON mfa_sessions(expires_at)
+        """)
+        db.commit()
+    
+    def create(self, user_id: str, mfa_type: str) -> str:
+        """
+        创建MFA会话
+        
+        Returns:
+            session_token
+        """
+        session_token = secrets.token_urlsafe(32)
+        now = int(time.time())
+        expires_at = now + self.SESSION_TTL
+        
+        if self._use_db:
+            db = get_db()
+            # 清理旧会话
+            db.execute("DELETE FROM mfa_sessions WHERE user_id = ?", (user_id,))
+            db.execute("""
+                INSERT INTO mfa_sessions 
+                (session_token, user_id, mfa_type, expires_at, attempts, created_at)
+                VALUES (?, ?, ?, ?, 0, ?)
+            """, (session_token, user_id, mfa_type, expires_at, now))
+            db.commit()
+        else:
+            # 清理旧会话
+            self._cleanup_user_sessions(user_id)
+            self._cache.set(f"mfa_session:{session_token}", 
+                json.dumps({'user_id': user_id, 'mfa_type': mfa_type, 'attempts': 0}),
+                ex=self.SESSION_TTL)
+        
+        return session_token
+    
+    def get(self, session_token: str) -> dict:
+        """获取会话"""
+        self._cleanup_expired()
+        
+        if self._use_db:
+            db = get_db()
+            row = db.execute("""
+                SELECT * FROM mfa_sessions WHERE session_token = ?
+            """, (session_token,)).fetchone()
+            
+            if not row:
+                return None
+            
+            return {
+                'user_id': row['user_id'],
+                'mfa_type': row['mfa_type'],
+                'expires_at': row['expires_at'],
+                'attempts': row['attempts'],
+                'locked_until': row['locked_until']
+            }
+        else:
+            data = self._cache.get(f"mfa_session:{session_token}")
+            if data:
+                return json.loads(data)
+            return None
+    
+    def delete(self, session_token: str):
+        """删除会话"""
+        if self._use_db:
+            db = get_db()
+            db.execute("DELETE FROM mfa_sessions WHERE session_token = ?", (session_token,))
+            db.commit()
+        else:
+            self._cache.delete(f"mfa_session:{session_token}")
+    
+    def increment_attempts(self, session_token: str) -> int:
+        """增加尝试次数，返回当前次数"""
+        now = int(time.time())
+        
+        if self._use_db:
+            db = get_db()
+            db.execute("""
+                UPDATE mfa_sessions 
+                SET attempts = attempts + 1 
+                WHERE session_token = ?
+            """, (session_token,))
+            db.commit()
+            
+            row = db.execute("""
+                SELECT attempts, locked_until FROM mfa_sessions WHERE session_token = ?
+            """, (session_token,)).fetchone()
+            
+            attempts = row['attempts'] if row else 0
+            locked_until = row['locked_until'] if row else 0
+            
+            # 检查是否需要锁定
+            if attempts >= self.MAX_VERIFY_ATTEMPTS and locked_until < now:
+                db.execute("""
+                    UPDATE mfa_sessions 
+                    SET locked_until = ? 
+                    WHERE session_token = ?
+                """, (now + self.COOLDOWN_TTL, session_token))
+                db.commit()
+                logger.warning(f"MFA会话 {session_token[:8]}... 因多次失败被锁定{self.COOLDOWN_TTL}秒")
+            
+            return attempts
+        else:
+            key = f"mfa_session:{session_token}"
+            data = self._cache.get(key)
+            if data:
+                session = json.loads(data)
+                session['attempts'] = session.get('attempts', 0) + 1
+                attempts = session['attempts']
+                
+                # 计算剩余TTL
+                ttl = self._cache.client.ttl(key)
+                if ttl < 0:
+                    ttl = self.SESSION_TTL
+                
+                if attempts >= self.MAX_VERIFY_ATTEMPTS:
+                    session['locked_until'] = now + self.COOLDOWN_TTL
+                    # 锁定时缩短TTL
+                    ttl = min(ttl, self.COOLDOWN_TTL)
+                
+                self._cache.set(key, json.dumps(session), ex=ttl)
+                return attempts
+            return 0
+    
+    def is_locked(self, session_token: str) -> tuple:
+        """
+        检查是否被锁定
+        Returns:
+            (is_locked: bool, reason: str)
+        """
+        now = int(time.time())
+        
+        if self._use_db:
+            db = get_db()
+            row = db.execute("""
+                SELECT locked_until, expires_at FROM mfa_sessions WHERE session_token = ?
+            """, (session_token,)).fetchone()
+            
+            if not row:
+                return True, "会话不存在"
+            
+            if row['expires_at'] < now:
+                return True, "会话已过期"
+            
+            if row['locked_until'] > now:
+                remaining = row['locked_until'] - now
+                return True, f"因多次验证失败，请{remaining}秒后重试"
+            
+            return False, ""
+        else:
+            key = f"mfa_session:{session_token}"
+            data = self._cache.get(key)
+            if not data:
+                return True, "会话不存在"
+            
+            session = json.loads(data)
+            expires_at = session.get('expires_at', 0)
+            locked_until = session.get('locked_until', 0)
+            
+            if expires_at < now:
+                return True, "会话已过期"
+            
+            if locked_until > now:
+                remaining = locked_until - now
+                return True, f"因多次验证失败，请{remaining}秒后重试"
+            
+            return False, ""
+    
+    def _cleanup_expired(self):
+        """清理过期会话"""
+        if self._use_db:
+            try:
+                db = get_db()
+                now = int(time.time())
+                db.execute("DELETE FROM mfa_sessions WHERE expires_at < ? OR locked_until < ?", (now, now))
+                db.commit()
+            except Exception as e:
+                logger.error(f"清理MFA会话失败: {e}")
+    
+    def _cleanup_user_sessions(self, user_id: str):
+        """清理用户的旧会话"""
+        if not self._use_db:
+            pattern = "mfa_session:*"
+            try:
+                keys = self._cache.client.keys(pattern)
+                for key in keys:
+                    data = self._cache.get(key)
+                    if data:
+                        session = json.loads(data)
+                        if session.get('user_id') == user_id:
+                            self._cache.delete(key)
+            except Exception:
+                pass
+
+
+# 全局MFA会话存储实例
+_mfa_session_store: MFASessionStore = None
+
+
+def get_mfa_session_store() -> MFASessionStore:
+    """获取MFA会话存储实例"""
+    global _mfa_session_store
+    if _mfa_session_store is None:
+        _mfa_session_store = MFASessionStore()
+    return _mfa_session_store
+
+
+# 保持向后兼容的别名
+def _get_mfa_sessions():
+    """获取会话存储（兼容旧接口）"""
+    return get_mfa_session_store()
 
 
 def require_auth(func):
@@ -62,13 +336,16 @@ def require_mfa_session(func):
             return jsonify({'error': 'Missing session token'}), 401
         
         session_token = auth_header[7:]
-        if session_token not in MFA_SESSIONS:
+        store = get_mfa_session_store()
+        session = store.get(session_token)
+        
+        if not session:
             return jsonify({'error': 'Invalid or expired session'}), 401
         
-        session = MFA_SESSIONS[session_token]
-        if session['expires_at'] < time.time():
-            del MFA_SESSIONS[session_token]
-            return jsonify({'error': 'Session expired'}), 401
+        # 【v1.3】检查会话是否被锁定
+        is_locked, reason = store.is_locked(session_token)
+        if is_locked:
+            return jsonify({'error': reason}), 429
         
         g.mfa_session = session
         g.mfa_token = session_token
@@ -227,8 +504,18 @@ def verify_mfa():
     db = get_db()
     
     # 验证验证码
+    # 【v1.3】增加尝试次数
+    store = get_mfa_session_store()
+    attempts = store.increment_attempts(mfa_token)
+    
+    if attempts >= store.MAX_VERIFY_ATTEMPTS:
+        is_locked, reason = store.is_locked(mfa_token)
+        if is_locked:
+            write_audit(user_id, 'MFA_VERIFY_FAILED', details={'reason': 'locked', 'attempts': attempts})
+            return jsonify({'error': reason}), 429
+    
     if not _verify_and_consume_code(db, user_id, code):
-        write_audit(user_id, 'MFA_VERIFY_FAILED')
+        write_audit(user_id, 'MFA_VERIFY_FAILED', details={'attempts': attempts})
         return jsonify({'error': 'Invalid or expired code'}), 401
     
     # 生成JWT
@@ -244,7 +531,7 @@ def verify_mfa():
         device_service.register_device(db, user_id, device_fingerprint, device_info, ip, user_agent)
     
     # 清理MFA会话
-    del MFA_SESSIONS[mfa_token]
+    store.delete(mfa_token)
     
     write_audit(user_id, 'MFA_VERIFY_SUCCESS', details={'mfa_type': session.get('mfa_type')})
     
@@ -360,7 +647,8 @@ def use_backup_code():
         device_service.register_device(db, user_id, device_fingerprint, device_info, ip, user_agent)
     
     # 清理MFA会话
-    del MFA_SESSIONS[mfa_token]
+    store = get_mfa_session_store()
+    store.delete(mfa_token)
     
     write_audit(user_id, 'MFA_BACKUP_SUCCESS', details={'codes_remaining': len(backup_codes)})
     

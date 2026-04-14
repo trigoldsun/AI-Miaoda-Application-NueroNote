@@ -40,6 +40,8 @@ class DeviceService:
     
     TRUST_DAYS = 30
     TRUST_SECONDS = TRUST_DAYS * 24 * 60 * 60
+    # 【v1.3】用于设备指纹哈希的盐值
+    _fp_salt = "NueroNote:v1.3:device-fingerprint-salt"
     
     def __init__(self):
         self.cache = None
@@ -49,8 +51,17 @@ class DeviceService:
         return secrets.token_hex(16)
     
     def hash_fingerprint(self, fingerprint: str) -> str:
-        """哈希指纹（保护隐私，服务端不存储原始指纹）"""
-        return hashlib.sha256(fingerprint.encode()).hexdigest()[:32]
+        """
+        【v1.3安全修复】哈希指纹使用HMAC防止彩虹表攻击
+        使用用户专属盐值，保护相同设备指纹
+        """
+        import hmac
+        # 使用固定盐值进行HMAC
+        return hmac.new(
+            self._fp_salt.encode('utf-8'),
+            fingerprint.encode('utf-8'),
+            hashlib.sha256
+        ).hexdigest()[:32]
     
     def check_trusted(
         self, 

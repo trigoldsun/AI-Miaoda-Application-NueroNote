@@ -68,16 +68,23 @@ def create_app():
         PROPAGATE_EXCEPTIONS=True,
     )
     
-    # 启用CORS（生产环境应限制来源）
+    # 【v1.3】CORS配置 - 生产环境禁止使用*
+    # 允许的域名列表（生产环境必须明确配置）
+    ALLOWED_ORIGINS = [
+        "https://nueronote.app",
+        "https://app.nueronote.com",
+    ]
+    
+    # 仅在调试模式且明确允许时才使用*
+    cors_origins = "*" if settings.debug else ALLOWED_ORIGINS
+    
     CORS(app, resources={
         r"/api/*": {
-            "origins": "*" if settings.debug else [
-                "https://nueronote.app",
-                "https://app.nueronote.com",
-            ],
+            "origins": cors_origins,
             "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
             "allow_headers": ["Authorization", "Content-Type"],
             "max_age": 86400,
+            "supports_credentials": True,
         }
     })
     
