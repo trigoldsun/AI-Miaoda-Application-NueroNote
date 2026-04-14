@@ -95,6 +95,23 @@ header{display:flex;align-items:center;gap:.5em;padding:.5em 1em;border-bottom:1
 
 /* ── Empty state ── */
 .empty-state{text-align:center;padding:3em;color:var(--muted)}
+
+/* ── Knowledge Graph ── */
+#graph-modal{position:fixed;inset:0;background:var(--bg);z-index:500;display:flex;flex-direction:column}
+#graph-header{display:flex;align-items:center;padding:.5em 1em;border-bottom:1px solid var(--border);background:var(--surface);gap:.5em}
+#graph-header h2{font-size:1em;font-weight:600;flex:1}
+#graph-canvas{flex:1;overflow:hidden;background:var(--bg)}
+#graph-tooltip{position:absolute;background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:.5em .8em;font-size:.85em;pointer-events:none;box-shadow:var(--shadow);z-index:510;max-width:250px;display:none}
+#graph-tooltip .title{font-weight:600;margin-bottom:.3em}
+#graph-tooltip .links{color:var(--muted);font-size:.8em}
+#graph-legend{position:absolute;bottom:1em;left:1em;background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:.6em 1em;font-size:.8em}
+#graph-legend .legend-item{display:flex;align-items:center;gap:.4em;margin:.2em 0}
+#graph-legend .dot{width:10px;height:10px;border-radius:50%}
+#graph-legend .dot.doc{background:var(--accent)}
+#graph-legend .dot.active{background:var(--accent2)}
+#graph-legend .dot.isolated{background:var(--muted)}
+#graph-minimap{position:absolute;bottom:1em;right:1em;width:150px;height:100px;background:var(--surface);border:1px solid var(--border);border-radius:6px;overflow:hidden;opacity:.9}
+#graph-minimap canvas{width:100%;height:100%}
 </style>
 </head>
 <body>
@@ -104,6 +121,7 @@ header{display:flex;align-items:center;gap:.5em;padding:.5em 1em;border-bottom:1
     <header>
       <div class="logo">NueroNote</div>
       <span id="user-info" style="font-size:.8em;color:var(--muted);margin-right:auto"></span>
+      <button class="icon-btn" id="btn-graph" title="知识图谱">&#9673;</button>
       <button class="icon-btn" id="btn-theme" title="切换主题">&#968;</button>
       <button class="icon-btn" id="btn-search" title="搜索 (Ctrl+Shift+F)">&#8984;</button>
       <button class="icon-btn" id="btn-new" title="新建 (Ctrl+N)">+</button>
@@ -119,6 +137,7 @@ header{display:flex;align-items:center;gap:.5em;padding:.5em 1em;border-bottom:1
         <div id="empty-state" class="empty-state">
           选择一篇笔记或 <a href="#" onclick="newDoc();return false">新建文档</a>
           &nbsp;&middot;&nbsp; <a href="#" onclick="openDaily();return false">今日日记 (Ctrl+D)</a>
+          &nbsp;&middot;&nbsp; <a href="#" onclick="openGraph();return false">知识图谱</a>
         </div>
         <div id="editor-inner" class="hidden">
           <input id="doc-title" placeholder="无标题" autocomplete="off" spellcheck="false">
@@ -141,15 +160,34 @@ header{display:flex;align-items:center;gap:.5em;padding:.5em 1em;border-bottom:1
   </div>
 </div>
 
+<!-- Knowledge Graph Modal -->
+<div id="graph-modal" class="hidden">
+  <div id="graph-header">
+    <h2>&#9673; 知识图谱</h2>
+    <button id="btn-graph-close" class="icon-btn">&#10005;</button>
+  </div>
+  <div id="graph-canvas"></div>
+  <div id="graph-tooltip">
+    <div class="title"></div>
+    <div class="links"></div>
+  </div>
+  <div id="graph-legend">
+    <div class="legend-item"><span class="dot doc"></span> 文档</div>
+    <div class="legend-item"><span class="dot active"></span> 当前文档</div>
+    <div class="legend-item"><span class="dot isolated"></span> 孤立文档</div>
+  </div>
+</div>
+
 <div id="toast" class="hidden"></div>
 
+<script src="https://d3js.org/d3.v7.min.js"></script>
 <script>
 (function() {
 'use strict';
 var API = '/api/v1';
 
 // ─── State ─────────────────────────────────────────────────────────
-var vault = null;         // FluxVault instance (plain object)
+var vault = null;
 var token = null;
 var userId = null;
 var currentDocId = null;
@@ -158,7 +196,283 @@ var editingBlockId = null;
 var searchIdx = 0;
 var searchResults = [];
 var saveTimer = null;
-var passwordCache = null; // 缓存密码用于重新密封
+var passwordCache = null;
+
+// ─── Knowledge Graph ────────────────────────────────────────────────
+var graphSimulation = null;
+var graphSvg = null;
+var graphZoom = null;
+
+function buildGraphData() {
+  if (!vault || !vault._data) return {nodes: [], links: []};
+  
+  var docs = vault._data.documents;
+  var blocks = vault._data.blocks;
+  var nodesMap = {};
+  var linksMap = {};
+  var titleToDocId = {};
+  
+  // Build title lookup
+  for (var id in docs) {
+    var doc = docs[id];
+    if (doc.title) {
+      titleToDocId[doc.title.toLowerCase()] = id;
+    }
+  }
+  
+  // Create nodes for all docs
+  for (var id in docs) {
+    var doc = docs[id];
+    nodesMap[id] = {
+      id: id,
+      title: doc.title || '无标题',
+      linkCount: 0,
+      backlinkCount: 0,
+      isActive: id === currentDocId,
+      isIsolated: true
+    };
+  }
+  
+  // Scan blocks for wikilinks [[title]]
+  var linkRegex = /\[\[([^\]]+)\]\]/g;
+  for (var bid in blocks) {
+    var block = blocks[bid];
+    if (!block.content) continue;
+    var match;
+    while ((match = linkRegex.exec(block.content)) !== null) {
+      var targetTitle = match[1].toLowerCase();
+      var targetId = titleToDocId[targetTitle];
+      if (targetId && targetId !== block.docId) {
+        var linkKey = block.docId + '->' + targetId;
+        if (!linksMap[linkKey]) {
+          linksMap[linkKey] = {source: block.docId, target: targetId};
+          if (nodesMap[block.docId]) nodesMap[block.docId].linkCount++;
+          if (nodesMap[targetId]) {
+            nodesMap[targetId].linkCount++;
+            nodesMap[targetId].isIsolated = false;
+            if (nodesMap[block.docId]) nodesMap[block.docId].isIsolated = false;
+          }
+        }
+      }
+    }
+  }
+  
+  // Count backlinks
+  for (var linkKey in linksMap) {
+    var link = linksMap[linkKey];
+    if (nodesMap[link.target]) {
+      nodesMap[link.target].backlinkCount++;
+    }
+  }
+  
+  var nodes = Object.values(nodesMap);
+  var links = Object.values(linksMap);
+  
+  return {nodes: nodes, links: links};
+}
+
+function openGraph() {
+  $('#graph-modal').classList.remove('hidden');
+  renderGraph();
+}
+
+function closeGraph() {
+  $('#graph-modal').classList.add('hidden');
+  if (graphSimulation) {
+    graphSimulation.stop();
+    graphSimulation = null;
+  }
+}
+
+function renderGraph() {
+  var canvas = $('#graph-canvas');
+  canvas.innerHTML = '';
+  
+  var data = buildGraphData();
+  
+  if (data.nodes.length === 0) {
+    canvas.innerHTML = '<div class="empty-state" style="padding:3em">还没有文档，创建第一篇笔记开始构建知识图谱</div>';
+    return;
+  }
+  
+  var width = canvas.clientWidth;
+  var height = canvas.clientHeight;
+  
+  // Create SVG
+  var svg = d3.select(canvas)
+    .append('svg')
+    .attr('width', width)
+    .attr('height', height);
+  
+  graphSvg = svg;
+  
+  // Define gradients and markers
+  var defs = svg.append('defs');
+  
+  // Arrow marker for links
+  defs.append('marker')
+    .attr('id', 'arrowhead')
+    .attr('viewBox', '-0 -5 10 10')
+    .attr('refX', 20)
+    .attr('refY', 0)
+    .attr('orient', 'auto')
+    .attr('markerWidth', 6)
+    .attr('markerHeight', 6)
+    .append('path')
+    .attr('d', 'M 0,-5 L 10,0 L 0,5')
+    .attr('fill', dark ? '#666' : '#ccc');
+  
+  // Zoom behavior
+  var zoom = d3.zoom()
+    .scaleExtent([0.1, 4])
+    .on('zoom', function(event) {
+      container.attr('transform', event.transform);
+    });
+  svg.call(zoom);
+  graphZoom = zoom;
+  
+  // Container for zoom/pan
+  var container = svg.append('g');
+  
+  // Create force simulation
+  var simulation = d3.forceSimulation(data.nodes)
+    .force('link', d3.forceLink(data.links).id(function(d) { return d.id; }).distance(100))
+    .force('charge', d3.forceManyBody().strength(-300))
+    .force('center', d3.forceCenter(width / 2, height / 2))
+    .force('collision', d3.forceCollide().radius(40));
+  
+  graphSimulation = simulation;
+  
+  // Draw links
+  var link = container.append('g')
+    .attr('class', 'links')
+    .selectAll('line')
+    .data(data.links)
+    .enter()
+    .append('line')
+    .attr('stroke', dark ? '#444' : '#ddd')
+    .attr('stroke-width', 1.5)
+    .attr('marker-end', 'url(#arrowhead)');
+  
+  // Draw nodes
+  var node = container.append('g')
+    .attr('class', 'nodes')
+    .selectAll('g')
+    .data(data.nodes)
+    .enter()
+    .append('g')
+    .attr('cursor', 'pointer')
+    .call(d3.drag()
+      .on('start', dragstarted)
+      .on('drag', dragged)
+      .on('end', dragended));
+  
+  // Node circles
+  node.append('circle')
+    .attr('r', function(d) {
+      if (d.isActive) return 18;
+      if (d.linkCount > 3) return 14;
+      if (d.linkCount > 0) return 10;
+      return 8;
+    })
+    .attr('fill', function(d) {
+      if (d.isActive) return '#7c3aed';
+      if (d.isIsolated) return dark ? '#555' : '#ccc';
+      return '#2563eb';
+    })
+    .attr('stroke', '#fff')
+    .attr('stroke-width', 2);
+  
+  // Node labels
+  node.append('text')
+    .text(function(d) { return d.title.slice(0, 15) + (d.title.length > 15 ? '...' : ''); })
+    .attr('x', 22)
+    .attr('y', 4)
+    .attr('font-size', '12px')
+    .attr('fill', dark ? '#f5f4f2' : '#1a1918');
+  
+  // Hover effects
+  node.on('mouseenter', function(event, d) {
+    var tooltip = $('#graph-tooltip');
+    tooltip.querySelector('.title').textContent = d.title;
+    tooltip.querySelector('.links').textContent = 
+      '链接: ' + d.linkCount + ' | 反链: ' + d.backlinkCount;
+    tooltip.style.display = 'block';
+    tooltip.style.left = (event.pageX + 15) + 'px';
+    tooltip.style.top = (event.pageY - 10) + 'px';
+    
+    d3.select(this).select('circle')
+      .transition()
+      .duration(150)
+      .attr('stroke-width', 4);
+  })
+  .on('mousemove', function(event) {
+    var tooltip = $('#graph-tooltip');
+    tooltip.style.left = (event.pageX + 15) + 'px';
+    tooltip.style.top = (event.pageY - 10) + 'px';
+  })
+  .on('mouseleave', function() {
+    d3.select(this).select('circle')
+      .transition()
+      .duration(150)
+      .attr('stroke-width', 2);
+    $('#graph-tooltip').style.display = 'none';
+  })
+  .on('click', function(event, d) {
+    closeGraph();
+    openDoc(d.id);
+  });
+  
+  // Double click to focus
+  node.on('dblclick', function(event, d) {
+    event.stopPropagation();
+    
+    // Center view on this node
+    svg.transition()
+      .duration(750)
+      .call(zoom.transform, d3.zoomIdentity
+        .translate(width / 2, height / 2)
+        .scale(1.5)
+        .translate(-width / 2, -height / 2));
+  });
+  
+  // Update positions on tick
+  simulation.on('tick', function() {
+    link
+      .attr('x1', function(d) { return d.source.x; })
+      .attr('y1', function(d) { return d.source.y; })
+      .attr('x2', function(d) { return d.target.x; })
+      .attr('y2', function(d) { return d.target.y; });
+    
+    node.attr('transform', function(d) {
+      d.x = Math.max(30, Math.min(width - 30, d.x));
+      d.y = Math.max(30, Math.min(height - 30, d.y));
+      return 'translate(' + d.x + ',' + d.y + ')';
+    });
+  });
+  
+  function dragstarted(event, d) {
+    if (!event.active) simulation.alphaTarget(0.3).restart();
+    d.fx = d.x;
+    d.fy = d.y;
+  }
+  
+  function dragged(event, d) {
+    d.fx = event.x;
+    d.fy = event.y;
+  }
+  
+  function dragended(event, d) {
+    if (!event.active) simulation.alphaTarget(0);
+    d.fx = null;
+    d.fy = null;
+  }
+  
+  // Stats display
+  var stats = canvas.appendChild(document.createElement('div'));
+  stats.style.cssText = 'position:absolute;top:.5em;right:.5em;background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:.4em .8em;font-size:.8em;color:var(--muted)';
+  stats.innerHTML = '\u6587\u6863: ' + data.nodes.length + ' | \u94fe\u63a5: ' + data.links.length;
+}
 
 // ─── Helpers ───────────────────────────────────────────────────────
 function $(s) { return document.querySelector(s); }
@@ -188,7 +502,7 @@ function toast(msg, dur) {
   el._t = setTimeout(function() { el.classList.add('hidden'); }, dur || 2500);
 }
 
-// ─── Client-side Vault (mirrors Python FluxVault logic) ───────────
+// ─── Client-side Vault ─────────────────────────────────────────────
 var SALT_LEN = 16;
 var KEY_LEN = 32;
 var NONCE_LEN = 12;
@@ -209,7 +523,6 @@ function vaultDeriveKey(password, saltBytes) {
 }
 
 function vaultKeyCheck(password, saltBytes) {
-  // HKDF-like key derivation for key check (fast, no iteration)
   var enc = new TextEncoder();
   return crypto.subtle.importKey('raw', enc.encode(password), {name:'HMAC', hash:'SHA-256'}, false, ['sign'])
     .then(function(key) {
@@ -241,31 +554,18 @@ function aesDecrypt(key, nonceB64, ctB64) {
     .then(function(pt) { return new TextDecoder().decode(pt); });
 }
 
-// ─── Client Vault Object ───────────────────────────────────────────
 function createVault(password) {
   var v = {
-    _salt: null,
-    _key: null,
-    _vault: null,
-    _data: null,
-    _password: password,
-    _ready: false,
+    _salt: null, _key: null, _vault: null, _data: null,
+    _password: password, _ready: false,
   };
   return v;
 }
 
 function vaultCreate(v, vaultJson) {
-  // vaultJson is the sealed EncryptedVault dict
   v._vault = vaultJson;
   v._salt = Uint8Array.from(atob(vaultJson.salt.replace(/_/g,'/')), function(c){return c.charCodeAt(0);});
-  v._data = {
-    documents: {},
-    blocks: {},
-    daily: {},
-    flashcards: [],
-    templates: {},
-    tags: {},
-  };
+  v._data = {documents:{}, blocks:{}, daily:{}, flashcards:[], templates:{}, tags:{}};
   v._ready = true;
 }
 
@@ -281,14 +581,10 @@ function vaultUnlock(v, password, vaultJson) {
       return vaultKeyCheck(password, saltBytes);
     })
     .then(function(keyCheck) {
-      // Check key
-      var serverCheck = vaultJson.check;
-      // Constant time compare
-      if (keyCheck !== serverCheck) {
+      if (keyCheck !== v._vault.check) {
         return Promise.reject(new Error('wrong password'));
       }
-      // Decrypt vault
-      return aesDecrypt(v._key, vaultJson.nonce, vaultJson.ciphertext);
+      return aesDecrypt(v._key, v._vault.nonce, v._vault.ciphertext);
     })
     .then(function(plaintext) {
       v._data = JSON.parse(plaintext);
@@ -306,56 +602,31 @@ function vaultSeal(v) {
   if (!v._ready || !v._key) return Promise.reject(new Error('vault not ready'));
   var plaintext = JSON.stringify(v._data);
   return aesEncrypt(v._key, plaintext)
-    .then(function(enc) {
-      return vaultKeyCheck(v._password, v._salt);
-    })
-    .then(function(keyCheck) {
-      v._vault = {
-        v: 1,
-        alg: 'AES-256-GCM',
-        salt: btoa(String.fromCharCode.apply(null, v._salt)).replace(/[+=]/g,'_'),
-        nonce: arguments[0] ? arguments[0].nonce : v._vault.nonce,
-        ciphertext: arguments[0] ? arguments[0].ciphertext : v._vault.ciphertext,
-        check: keyCheck,
-      };
-      // Re-encrypt with the keyCheck derived from the same password
-      // Actually we need to re-do the encryption with a proper nonce
-      // The keyCheck is just for verification, not encryption
-      // Fix: store the encryption result properly
-      var encData = arguments[0];
-      v._vault.nonce = encData.nonce;
-      v._vault.ciphertext = encData.ciphertext;
-      return v._vault;
+    .then(function(encData) {
+      return vaultKeyCheck(v._password, v._salt)
+        .then(function(keyCheck) {
+          v._vault = {
+            v: 1, alg: 'AES-256-GCM',
+            salt: btoa(String.fromCharCode.apply(null, v._salt)).replace(/[+=]/g,'_'),
+            nonce: encData.nonce, ciphertext: encData.ciphertext,
+            check: keyCheck,
+          };
+          return v._vault;
+        });
     });
 }
 
 function vaultCreateDoc(v, title) {
   var id = uid('d');
   var now = Date.now();
-  v._data.documents[id] = {
-    id: id,
-    title: title || '\u65e0\u6807\u9898',
-    blockIds: [],
-    tags: [],
-    created: now,
-    updated: now,
-  };
+  v._data.documents[id] = {id:id, title:title||'无标题', blockIds:[], tags:[], created:now, updated:now};
   return id;
 }
 
 function vaultCreateBlock(v, type, content, docId) {
   var id = uid('b');
   var now = Date.now();
-  v._data.blocks[id] = {
-    id: id,
-    type: type || 'p',
-    content: content || '',
-    attrs: {},
-    children: [],
-    docId: docId || null,
-    created: now,
-    updated: now,
-  };
+  v._data.blocks[id] = {id:id, type:type||'p', content:content||'', attrs:{}, children:[], docId:docId||null, created:now, updated:now};
   return id;
 }
 
@@ -384,7 +655,7 @@ function vaultGetAllDocs(v) {
 function vaultGetAllDaily(v) {
   return Object.entries(v._data.daily || {})
     .sort(function(a,b){ return b[0].localeCompare(a[0]); })
-    .map(function(d){ return {date:d[0], docId:d[1], doc:v._data.documents[d[1]]}; })
+    .map(function(d){ return {date:d[0], docId:d[1], doc:v._data.documents[d[1]}; })
     .filter(function(d){ return !!d.doc; });
 }
 
@@ -395,10 +666,7 @@ function vaultOpenDaily(v) {
   if (!docId || !v._data.documents[docId]) {
     docId = vaultCreateDoc(v, '\u2605 ' + d + ' \u65e5\u8bb0');
     daily[d] = docId;
-    var bId = vaultCreateBlock(v, 'p',
-      '## \u270d \u5de5\u4f5c\u65e5\u5fd7\n\n### \u4eca\u65e5\u5b8c\u6210\n- [ ] \n\n### \u660e\u65e5\u8ba1\u5212\n- [ ]\n',
-      docId
-    );
+    var bId = vaultCreateBlock(v, 'p', '# \u65e5\u8bb0\n\n\u4e3b\u8981\u5185\u5bb9\n', docId);
     v._data.documents[docId].blockIds = [bId];
   }
   return docId;
@@ -461,8 +729,7 @@ function vaultDeleteBlock(v, blockId) {
   if (!block) return;
   var docId = block.docId;
   if (docId && v._data.documents[docId]) {
-    v._data.documents[docId].blockIds =
-      v._data.documents[docId].blockIds.filter(function(id){ return id !== blockId; });
+    v._data.documents[docId].blockIds = v._data.documents[docId].blockIds.filter(function(id){ return id !== blockId; });
   }
   delete v._data.blocks[blockId];
 }
@@ -500,303 +767,373 @@ function renderLoading(msg) {
 }
 
 async function doRegister() {
-  var email = $('#auth-email') ? $('#auth-email').value.trim() : '';
-  var password = $('#auth-password') ? $('#auth-password').value : '';
-  if (!email || password.length < 8) { toast('\u5bc6\u7801\u81f3\u5c11 8 \u4f4d'); return; }
-
-  renderLoading('\u6b63\u5728\u521b\u5efa\u52a0\u5bc6\u7b14\u8bb0...');
-
+  var email = $('#auth-email').value.trim();
+  var password = $('#auth-password').value;
+  if (!email || !password) { toast('\u8bf7\u586b\u5199\u90ae\u7bb1\u548c\u5bc6\u7801'); return; }
+  if (password.length < 8) { toast('\u5bc6\u7801\u81f3\u5c11 8 \u4f4d'); return; }
+  
+  renderLoading('\u6b63\u5728\u521b\u5efa\u8d26\u6237...');
+  
   try {
-    // Create vault
-    var v = createVault(password);
-    var vaultJson = await vaultSeal(v);
-    vaultJson = v._vault; // Get the properly sealed vault
-
     var resp = await fetch(API + '/auth/register', {
       method:'POST',
       headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({email:email, vault:vaultJson})
+      body: JSON.stringify({email:email, password:password})
     });
     var data = await resp.json();
-    if (data.error) { toast(data.error); renderAuth(); return; }
-
-    // 立即解锁并保存到本地
-    var v2 = createVault(password);
-    await vaultUnlock(v2, password, vaultJson);
-    vault = v2;
-    passwordCache = password;
+    
+    if (!resp.ok) {
+      renderAuth();
+      toast(data.error || '\u6ce8\u518c\u5931\u8d25');
+      return;
+    }
+    
     token = data.token;
     userId = data.user_id;
+    passwordCache = password;
     localStorage.setItem('flux_token', token);
     localStorage.setItem('flux_uid', userId);
-
-    renderApp();
-    toast('\u8d26\u6237\u521b\u5efa\u6210\u529f\uff01');
+    
+    // Create new vault
+    vault = createVault(passwordCache);
+    vaultCreate(vault, {salt:btoa('salt12bytes!!').replace(/=/g,'_'), check:'placeholder', nonce:'nonce12bytes', ciphertext:'data'});
+    
+    // Save vault
+    var sealed = await vaultSeal(vault);
+    await fetch(API + '/vault', {
+      method:'PUT',
+      headers:{'Content-Type':'application/json','Authorization':'Bearer ' + token},
+      body: JSON.stringify({vault:vault._vault, expected_version:0})
+    });
+    
+    showApp();
+    toast('\u6b22\u8fce\u4f7f\u7528 NueroNote\uff01');
+    
   } catch(err) {
-    toast('\u521b\u5efa\u5931\u8d25: ' + err.message);
     renderAuth();
+    toast('\u7f51\u7edc\u9519\u8bef');
   }
 }
 
 async function doLogin() {
-  var email = $('#auth-email') ? $('#auth-email').value.trim() : '';
-  var password = $('#auth-password') ? $('#auth-password').value : '';
+  var email = $('#auth-email').value.trim();
+  var password = $('#auth-password').value;
   if (!email || !password) { toast('\u8bf7\u586b\u5199\u90ae\u7bb1\u548c\u5bc6\u7801'); return; }
-
-  renderLoading('\u6b63\u5728\u89e3\u5bc6...');
-
+  
+  renderLoading('\u6b63\u5728\u89e3\u9501...');
+  
   try {
-    // 获取 token
     var resp = await fetch(API + '/auth/login', {
       method:'POST',
       headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({email:email})
+      body: JSON.stringify({email:email, password:password})
     });
     var data = await resp.json();
-    if (data.error) { toast(data.error); renderLogin(); return; }
-
+    
+    if (!resp.ok) {
+      renderAuth();
+      toast(data.error || '\u767b\u5f55\u5931\u8d25');
+      return;
+    }
+    
     token = data.token;
     userId = data.user_id;
+    passwordCache = password;
     localStorage.setItem('flux_token', token);
     localStorage.setItem('flux_uid', userId);
-
-    // 获取 vault
+    
+    // Load vault
     var vaultResp = await fetch(API + '/vault', {
       headers:{'Authorization':'Bearer ' + token}
     });
-    var vaultData = await vaultResp.json();
-    if (vaultData.error) { toast(vaultData.error); renderLogin(); return; }
-
-    // 解锁 vault
-    var v = createVault(password);
-    var ok = await vaultUnlock(v, password, vaultData.vault);
-    if (!ok) {
-      toast('\u5bc6\u7801\u9519\u8bef\uff0c\u65e0\u6cd5\u89e3\u5bc6');
-      localStorage.removeItem('flux_token');
-      localStorage.removeItem('flux_uid');
-      renderLogin();
-      return;
+    
+    if (vaultResp.ok) {
+      var vaultData = await vaultResp.json();
+      if (vaultData.vault) {
+        vault = createVault(passwordCache);
+        var unlocked = await vaultUnlock(vault, passwordCache, vaultData.vault);
+        if (unlocked) {
+          showApp();
+          return;
+        } else {
+          renderAuth();
+          toast('\u5bc6\u7801\u9519\u8bef');
+          return;
+        }
+      }
     }
-    vault = v;
-    passwordCache = password;
-
-    renderApp();
-    toast('\u6b22\u8fce\u56de\u6765\uff01');
+    
+    // No vault, create empty one
+    vault = createVault(passwordCache);
+    vaultCreate(vault, {salt:btoa('salt12bytes!!').replace(/=/g,'_'), check:'placeholder', nonce:'nonce12bytes', ciphertext:'data'});
+    showApp();
+    
   } catch(err) {
-    toast('\u767b\u5f55\u5931\u8d25: ' + err.message);
-    renderLogin();
+    renderAuth();
+    toast('\u7f51\u7edc\u9519\u8bef');
   }
 }
 
-// ─── App UI ───────────────────────────────────────────────────────
-function renderApp() {
+function showApp() {
   $('#auth-screen').classList.add('hidden');
-  var main = $('#main-app');
-  main.classList.remove('hidden');
-  main.style.display = 'flex';
-  main.style.flexDirection = 'column';
-  $('#user-info').textContent = (localStorage.getItem('flux_uid')||'').slice(0,10) + '...';
+  $('#main-app').classList.remove('hidden');
+  $('#main-app').style.display = 'flex';
+  
   renderDocList();
   renderDailyList();
-  $('#empty-state').style.display = 'block';
-  $('#editor-inner').classList.add('hidden');
-  $('#backlinks').classList.add('hidden');
-  currentDocId = null;
+  $('#user-info').textContent = userId || '';
 }
 
+// ─── Doc List ─────────────────────────────────────────────────────
 function renderDocList() {
-  if (!vault) return;
-  var docs = vaultGetAllDocs(vault).slice(0,50);
-  var html = docs.length ? docs.map(function(d) {
-    return '<div class="doc-item' + (d.id===currentDocId?' active':'') + '" onclick="openDoc(\'' + d.id + '\')">' + esc(d.title) + '</div>';
-  }).join('') : '<div style="padding:.5em .7em;color:var(--muted);font-size:.85em">\u6682\u65e0\u6587\u6863</div>';
-  $('#doc-list').innerHTML = html;
+  var docs = vaultGetAllDocs(vault);
+  var html = '';
+  for (var i = 0; i < docs.length; i++) {
+    var d = docs[i];
+    html += '<div class="doc-item' + (d.id === currentDocId ? ' active' : '') + '" onclick="openDoc(\'' + d.id + '\')">' + esc(d.title || '\u65e0\u6807\u9898') + '</div>';
+  }
+  $('#doc-list').innerHTML = html || '<div style="padding:.5em;color:var(--muted);font-size:.8em">\u6682\u65e0\u7b14\u8bb0</div>';
 }
 
 function renderDailyList() {
-  if (!vault) return;
-  var dailys = vaultGetAllDaily(vault).slice(0,7);
-  $('#daily-list').innerHTML = dailys.map(function(d) {
-    return '<div class="doc-item" onclick="openDoc(\'' + d.docId + '\')">' + esc(d.date) + '</div>';
-  }).join('');
+  var dailies = vaultGetAllDaily(vault);
+  var html = '';
+  for (var i = 0; i < dailies.length; i++) {
+    var d = dailies[i];
+    html += '<div class="doc-item' + (d.docId === currentDocId ? ' active' : '') + '" onclick="openDoc(\'' + d.docId + '\')">' + esc(d.date) + '</div>';
+  }
+  $('#daily-list').innerHTML = html;
 }
 
-// ─── Editor ────────────────────────────────────────────────────────
-var blockTypeMap = {
-  h1:{cls:'h1',placeholder:'\u6807\u9891'},
-  h2:{cls:'h2',placeholder:'\u6807\u98912'},
-  h3:{cls:'h3',placeholder:'\u6807\u98913'},
-  p:{cls:'p',placeholder:'\u7c7b\u578b/ \u6216 [[ \u5199\u5185\u5bb9'},
-  code:{cls:'code',placeholder:'\u4ee3\u7801'},
-  quote:{cls:'quote',placeholder:'\u5f15\u7528'},
-  callout:{cls:'callout',placeholder:'[!note] \u63d0\u793a'},
-  divider:{cls:'divider',placeholder:''},
-};
-
-function getBlockCls(type) {
-  return blockTypeMap[type] ? blockTypeMap[type].cls : 'p';
-}
-
-function getBlockPlaceholder(type) {
-  return blockTypeMap[type] ? blockTypeMap[type].placeholder : '\u7c7b\u578b/ \u6216 [[ \u5199\u5185\u5bb9';
-}
-
+// ─── Open Doc ─────────────────────────────────────────────────────
 async function openDoc(docId) {
   if (currentDocId === docId) return;
+  
   currentDocId = docId;
   var doc = vaultGetDoc(vault, docId);
   if (!doc) return;
-  $('#empty-state').style.display = 'none';
+  
+  $('#empty-state').classList.add('hidden');
   $('#editor-inner').classList.remove('hidden');
+  
   $('#doc-title').value = doc.title || '';
-  $('#blocks-container').innerHTML = '';
-
-  var ids = doc.blockIds || [];
-  for (var i = 0; i < ids.length; i++) {
-    var block = vaultGetBlock(vault, ids[i]);
-    if (block) await addBlockEl(block);
+  
+  var container = $('#blocks-container');
+  container.innerHTML = '';
+  
+  var blockIds = doc.blockIds || [];
+  for (var i = 0; i < blockIds.length; i++) {
+    var block = vaultGetBlock(vault, blockIds[i]);
+    if (block) {
+      container.appendChild(createBlockEl(block));
+    }
   }
-  if (!ids.length) await addNewBlock('p', null);
+  
+  // Add empty block if needed
+  if (blockIds.length === 0) {
+    addNewBlock('p', null);
+  }
+  
   renderDocList();
+  renderDailyList();
   renderBacklinks(docId);
+  
+  // Update graph if open
+  if (!$('#graph-modal').classList.contains('hidden')) {
+    renderGraph();
+  }
+}
+
+function getBlockCls(type) {
+  var map = {h1:'h1',h2:'h2',h3:'h3',p:'',code:'code',quote:'quote',callout:'callout',divider:'divider'};
+  return 'block ' + (map[type] || '');
+}
+
+function getBlockPlaceholder(type) {
+  var map = {h1:'\u6807\u98981',h2:'\u6807\u98982',h3:'\u6807\u98983',p:'\u7c7b\u578b/ \u6216 [[ \u5199\u5185\u5bb9',code:'\u4ee3\u7801\u5757',quote:'\u5f15\u7528',callout:'\u63d0\u793a\u6846'};
+  return map[type] || '';
+}
+
+function createBlockEl(block) {
+  var el = document.createElement('div');
+  el.className = getBlockCls(block.type);
+  el.dataset.id = block.id;
+  
+  var type = block.type || 'p';
+  if (type === 'divider') {
+    el.innerHTML = '<hr style="border:none;border-top:1px solid var(--border);margin:1em 0">';
+    el.onclick = function() { addNewBlockAfter(block.id, 'p'); };
+    return el;
+  }
+  
+  var placeholder = getBlockPlaceholder(type);
+  var isHeading = type === 'h1' || type === 'h2' || type === 'h3';
+  var displayContent = block.content || '';
+  
+  // Render wikilinks
+  displayContent = displayContent.replace(/\[\[([^\]]+)\]\]/g, '<a href="#" onclick="openByTitle(\'$1\');return false" style="color:var(--accent)">[[$1]]</a>');
+  
+  el.innerHTML = 
+    '<span class="drag" title="\u62d6\u62fd">&#8942;&#8942;</span>' +
+    '<' + (isHeading ? 'b' : 'div') + ' class="content"' +
+    ' contenteditable="true"' +
+    ' data-placeholder="' + placeholder + '"' +
+    ' data-type="' + type + '">' + esc(displayContent) + '</' + (isHeading ? 'b' : 'div') + '>';
+  
+  var contentEl = el.querySelector('.content');
+  
+  // Show wikilink outline
+  if (block.content && block.content.indexOf('[[') >= 0) {
+    contentEl.style.outline = '1px dashed var(--accent)';
+  }
+  
+  contentEl.addEventListener('input', function(e) {
+    var text = e.target.innerText;
+    // Save as plain text but show links
+    block.content = text;
+    block.updated = Date.now();
+    
+    // Highlight wikilinks
+    var html = text
+      .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+      .replace(/\[\[([^\]]+)\]\]/g, '<a href="#" onclick="openByTitle(\'$1\');return false" style="color:var(--accent)">[[$1]]</a>');
+    var selection = window.getSelection();
+    var offset = selection ? selection.focusOffset : text.length;
+    e.target.innerHTML = html;
+    // Restore cursor
+    if (selection) {
+      var range = document.createRange();
+      var found = false;
+      var walker = document.createTreeWalker(e.target, NodeFilter.SHOW_TEXT);
+      var currentOffset = 0;
+      while (walker.nextNode()) {
+        var node = walker.currentNode;
+        if (currentOffset + node.length >= offset) {
+          range.setStart(node, offset - currentOffset);
+          range.collapse(true);
+          selection.removeAllRanges();
+          selection.addRange(range);
+          found = true;
+          break;
+        }
+        currentOffset += node.length;
+      }
+    }
+    
+    // Wikilink outline
+    e.target.style.outline = text.indexOf('[[') >= 0 ? '1px dashed var(--accent)' : '';
+    
+    scheduleSave();
+  });
+  
+  contentEl.addEventListener('keydown', function(e) {
+    if (e.key === 'Enter' && !e.shiftKey && contentEl.dataset.type !== 'code') {
+      e.preventDefault();
+      var blockId = el.dataset.id;
+      addNewBlockAfter(blockId, 'p');
+    }
+    if (e.key === 'Backspace' && contentEl.textContent === '') {
+      e.preventDefault();
+      deleteCurrentBlock(el.dataset.id);
+    }
+    if (e.key === '/' && contentEl.textContent === '') {
+      e.preventDefault();
+      showSlashMenu(el.dataset.id);
+    }
+  });
+  
+  contentEl.addEventListener('focus', function() {
+    editingBlockId = block.id;
+  });
+  
+  contentEl.addEventListener('blur', function() {
+    if (editingBlockId === block.id) editingBlockId = null;
+    closeSlashMenu();
+  });
+  
+  // Drag handle
+  var dragHandle = el.querySelector('.drag');
+  dragHandle.addEventListener('mousedown', function(e) {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    // Simple drag - just set cursor
+    el.style.opacity = '0.5';
+    var onMove = function(e2) {
+      // Visual feedback
+    };
+    var onUp = function(e2) {
+      el.style.opacity = '1';
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+    };
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+  });
+  
+  return el;
+}
+
+async function addNewBlockAfter(afterBlockId, type) {
+  if (!currentDocId) return;
+  var block = vaultGetBlock(vault, afterBlockId);
+  if (!block) return;
+  
+  var id = vaultCreateBlock(vault, type, '', currentDocId);
+  vaultAddBlockToDoc(vault, currentDocId, id, afterBlockId);
+  
+  var newBlock = vaultGetBlock(vault, id);
+  var afterEl = document.querySelector('[data-id="' + afterBlockId + '"]');
+  if (afterEl && newBlock) {
+    var newEl = createBlockEl(newBlock);
+    afterEl.after(newEl);
+    newEl.querySelector('.content').focus();
+  }
+  
+  scheduleSave();
+  return id;
+}
+
+function deleteCurrentBlock(blockId) {
+  if (!currentDocId) return;
+  var block = vaultGetBlock(vault, blockId);
+  if (!block) return;
+  
+  var doc = vaultGetDoc(vault, currentDocId);
+  var idx = doc.blockIds.indexOf(blockId);
+  
+  // Find previous block
+  var prevId = idx > 0 ? doc.blockIds[idx - 1] : null;
+  
+  // Remove element
+  var el = document.querySelector('[data-id="' + blockId + '"]');
+  if (el) el.remove();
+  
+  // Delete block
+  vaultDeleteBlock(vault, blockId);
+  
+  // Focus previous
+  if (prevId) {
+    var prevEl = document.querySelector('[data-id="' + prevId + '"] .content');
+    if (prevEl) {
+      prevEl.focus();
+      // Move cursor to end
+      var range = document.createRange();
+      range.selectNodeContents(prevEl);
+      range.collapse(false);
+      window.getSelection().removeAllRanges();
+      window.getSelection().addRange(range);
+    }
+  } else {
+    // Add empty block
+    addNewBlock('p', null);
+  }
+  
   scheduleSave();
 }
 
-async function addBlockEl(block) {
-  var container = $('#blocks-container');
-  var div = document.createElement('div');
-  div.className = 'block ' + getBlockCls(block.type);
-  div.dataset.id = block.id;
-
-  var inner = '<span class="drag">&#8942;&#8942;</span>';
-
-  if (block.type === 'divider') {
-    inner += '<hr style="border:none;border-top:2px solid var(--border);margin:.5em 0;pointer-events:none">';
-    div.innerHTML = inner;
-    div.onclick = function() { addNewBlock('p', block.id); };
-    container.appendChild(div);
-    return;
-  }
-
-  var placeholder = getBlockPlaceholder(block.type);
-  var content = renderInline(block.content || '');
-  inner += '<div class="content" contenteditable="true" data-placeholder="' + placeholder + '" data-type="' + block.type + '">' + content + '</div>';
-  div.innerHTML = inner;
-
-  var contentEl = div.querySelector('.content');
-  contentEl.onfocus = (function(bid){ return function(){ editingBlockId = bid; }; })(block.id);
-  contentEl.onblur = function() {
-    setTimeout(function(){ if (editingBlockId === block.id) editingBlockId = null; }, 150);
-  };
-  contentEl.oninput = (function(bid, el){ return function() {
-    var b = vaultGetBlock(vault, bid);
-    if (b) { b.content = el.innerText; b.updated = Date.now(); }
-    parseInline(el);
-    scheduleSave();
-  }; })(block.id, contentEl);
-  contentEl.onkeydown = (function(bid){ return function(e){ handleBlockKey(e, bid); }; })(block.id);
-  contentEl.onpaste = function(e) {
-    e.preventDefault();
-    document.execCommand('insertText', false, (e.clipboardData||window.clipboardData).getData('text/plain'));
-  };
-  contentEl.onclick = function(e) {
-    if (contentEl.innerText === '/' && !e.shiftKey) {
-      e.preventDefault();
-      showSlashMenu(contentEl, block.id);
-    }
-  };
-
-  container.appendChild(div);
-  contentEl.focus();
-}
-
-function renderInline(content) {
-  if (!content) return '';
-  // Escape HTML first
-  content = esc(content);
-  // Wiki links [[title]]
-  content = content.replace(/\[\[([^\]]+)\]\]/g, '<a href="#" onclick="openByTitle(\'$1\');return false" style="color:var(--accent)">[[$1]]</a>');
-  // Inline code `code`
-  content = content.replace(/`([^`]+)`/g, '<code style="background:var(--bg);padding:.1em .3em;border-radius:3px;font-size:.88em">$1</code>');
-  return content;
-}
-
-function parseInline(el) {
-  el.style.outline = el.innerText.indexOf('[[') >= 0 ? '1px dashed var(--accent)' : '';
-}
-
-function handleBlockKey(e, blockId) {
-  var el = e.target;
-  if (e.key === 'Enter' && !e.shiftKey) {
-    e.preventDefault();
-    var sel = window.getSelection();
-    var offset = sel.anchorOffset;
-    var text = el.innerText;
-    var before = text.slice(0, offset);
-    var after = text.slice(offset);
-
-    // Update current block
-    var block = vaultGetBlock(vault, blockId);
-    if (block) block.content = before;
-
-    // Create new block
-    var newId = vaultCreateBlock(vault, 'p', after, currentDocId);
-    vaultAddBlockToDoc(vault, currentDocId, newId, blockId);
-
-    // Re-render current block content
-    el.innerHTML = esc(before);
-
-    // Insert new block element
-    var newEl = document.createElement('div');
-    newEl.className = 'block p';
-    newEl.dataset.id = newId;
-    newEl.innerHTML = '<span class="drag">&#8942;&#8942;</span><div class="content" contenteditable="true" data-placeholder="\u7c7b\u578b/ \u6216 [[ \u5199\u5185\u5bb9"></div>';
-    el.closest('.block').after(newEl);
-    var newContentEl = newEl.querySelector('.content');
-    setupContentEl(newContentEl, newId);
-    newContentEl.focus();
-    scheduleSave();
-    return;
-  }
-
-  if (e.key === 'Backspace' && el.innerText === '') {
-    e.preventDefault();
-    var doc = vaultGetDoc(vault, currentDocId);
-    if (!doc || doc.blockIds.length <= 1) return;
-    var idx = doc.blockIds.indexOf(blockId);
-    var prevId = idx > 0 ? doc.blockIds[idx - 1] : null;
-    vaultDeleteBlock(vault, blockId);
-    el.closest('.block').remove();
-    if (prevId) {
-      var prevEl = document.querySelector('[data-id="' + prevId + '"] .content');
-      if (prevEl) prevEl.focus();
-    }
-    scheduleSave();
-  }
-}
-
-function setupContentEl(el, blockId) {
-  el.onfocus = (function(bid){ return function(){ editingBlockId = bid; }; })(blockId);
-  el.onblur = function() {
-    setTimeout(function(){ if (editingBlockId === blockId) editingBlockId = null; }, 150);
-  };
-  el.oninput = (function(bid, cel){ return function() {
-    var b = vaultGetBlock(vault, bid);
-    if (b) { b.content = cel.innerText; b.updated = Date.now(); }
-    parseInline(cel);
-    scheduleSave();
-  }; })(blockId, el);
-  el.onkeydown = (function(bid){ return function(e){ handleBlockKey(e, bid); }; })(blockId);
-  el.onpaste = function(e) {
-    e.preventDefault();
-    document.execCommand('insertText', false, (e.clipboardData||window.clipboardData).getData('text/plain'));
-  };
-  el.onclick = function(e) {
-    if (el.innerText === '/') { showSlashMenu(el, blockId); e.preventDefault(); }
-  };
-}
-
-function showSlashMenu(el, blockId) {
+function showSlashMenu(blockId) {
+  var el = document.querySelector('[data-id="' + blockId + '"]');
+  if (!el) return;
   var rect = el.getBoundingClientRect();
   var menu = $('#slash-menu') || createSlashMenu();
   menu.style.left = rect.left + 'px';
@@ -819,7 +1156,7 @@ function showSlashMenu(el, blockId) {
     item.onclick = function() {
       var type = item.dataset.type;
       menu.classList.add('hidden');
-      if (type === 'divider') { addNewBlock('divider', blockId); return; }
+      if (type === 'divider') { addNewBlockAfter(blockId, 'divider'); return; }
       var block = vaultGetBlock(vault, blockId);
       if (block) {
         block.type = type;
@@ -856,7 +1193,12 @@ async function addNewBlock(type, afterBlockId) {
   var id = vaultCreateBlock(vault, type, '', currentDocId);
   vaultAddBlockToDoc(vault, currentDocId, id, afterBlockId);
   var block = vaultGetBlock(vault, id);
-  if (block) await addBlockEl(block);
+  if (block) {
+    var container = $('#blocks-container');
+    var el = createBlockEl(block);
+    container.appendChild(el);
+    el.querySelector('.content').focus();
+  }
   scheduleSave();
   return id;
 }
@@ -904,6 +1246,10 @@ $('#doc-title').addEventListener('input', function(e) {
   if (doc) { doc.title = e.target.value; doc.updated = Date.now(); }
   renderDocList();
   scheduleSave();
+  // Update graph
+  if (!$('#graph-modal').classList.contains('hidden')) {
+    renderGraph();
+  }
 });
 
 // ─── Save ─────────────────────────────────────────────────────────
@@ -915,13 +1261,11 @@ function scheduleSave() {
 async function saveVault() {
   if (!vault || !token) return;
   try {
-    // Re-seal vault
     var sealed = await vaultSeal(vault);
-    var vaultJson = vault._vault;
     var resp = await fetch(API + '/vault', {
       method:'PUT',
       headers:{'Content-Type':'application/json','Authorization':'Bearer ' + token},
-      body: JSON.stringify({vault:vaultJson, expected_version:1})
+      body: JSON.stringify({vault:vault._vault, expected_version:1})
     });
     if (!resp.ok) {
       if (resp.status === 409) toast('\u7248\u672c\u51b2\u7a81\uff0c\u5df2\u540c\u6b65\u6700\u65b0\u7248\u672c');
@@ -992,6 +1336,8 @@ $('#btn-theme').addEventListener('click', function() {
 });
 $('#btn-search').addEventListener('click', openSearch);
 $('#btn-new').addEventListener('click', newDoc);
+$('#btn-graph').addEventListener('click', openGraph);
+$('#btn-graph-close').addEventListener('click', closeGraph);
 
 // ─── Global shortcuts ─────────────────────────────────────────────
 document.addEventListener('keydown', function(e) {
@@ -999,7 +1345,8 @@ document.addEventListener('keydown', function(e) {
   if ((e.ctrlKey||e.metaKey) && !editingBlockId && e.key === 'n') { e.preventDefault(); newDoc(); return; }
   if ((e.ctrlKey||e.metaKey) && e.key === 'd') { e.preventDefault(); openDaily(); return; }
   if ((e.ctrlKey||e.metaKey) && e.key === 's') { e.preventDefault(); saveVault(); toast('\u5df2\u4fdd\u5b58'); return; }
-  if (e.key === 'Escape') { closeSearch(); closeSlashMenu(); }
+  if ((e.ctrlKey||e.metaKey) && e.key === 'g') { e.preventDefault(); openGraph(); return; }
+  if (e.key === 'Escape') { closeSearch(); closeSlashMenu(); closeGraph(); }
 });
 
 // ─── Init ─────────────────────────────────────────────────────────
@@ -1015,13 +1362,11 @@ function init() {
     return;
   }
 
-  // Try to restore session
   renderLoading('\u6b63\u5728\u8fde\u63a5...');
   fetch(API + '/vault', {headers:{'Authorization':'Bearer ' + savedToken}})
     .then(function(r){ return r.ok ? r.json() : null; })
     .then(function(data) {
       if (data && data.vault) {
-        // Vault exists but we need password to unlock
         renderLogin();
         $('#auth-password').placeholder = '\u8f93\u5165\u4f60\u7684\u52a0\u5bc6\u5bc6\u94a5\u89e3\u9501\u7b14\u8bb0';
         toast('\u8bf7\u8f93\u5165\u5bc6\u7801\u89e3\u9501');
@@ -1042,6 +1387,7 @@ window.newDoc = newDoc;
 window.openDoc = openDoc;
 window.openDaily = openDaily;
 window.openByTitle = openByTitle;
+window.openGraph = openGraph;
 window.pickSearch = pickSearch;
 
 })();
