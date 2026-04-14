@@ -1,0 +1,1050 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>NueroNote</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg:#f8f7f4;--surface:#fff;--border:#e4e2dc;
+  --text:#1a1918;--muted:#8a8580;--accent:#2563eb;
+  --accent2:#7c3aed;--tag-bg:#f3f0ff;--tag-text:#6d28d9;
+  --code-bg:#1e1e1e;--code-text:#d4d4d4;
+  --shadow:0 1px 3px rgba(0,0,0,.06),0 1px 2px rgba(0,0,0,.04);
+}
+.dark{--bg:#111110;--surface:#1c1b1a;--border:#2e2d2b;--text:#f5f4f2;--muted:#8a8580;--accent:#60a5fa;--accent2:#a78bfa;--tag-bg:#2e1065;--tag-text:#c4b5fd}
+html,body{height:100%;background:var(--bg);color:var(--text);font:15px system-ui,sans-serif}
+button{font:inherit;cursor:pointer;border:none;border-radius:6px;padding:.4em .8em;transition:all .15s}
+button.primary{background:var(--accent);color:#fff}
+button:hover{opacity:.88}
+input,textarea{font:inherit;width:100%;background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:.5em .7em;color:var(--text);resize:none}
+input:focus,textarea:focus{outline:2px solid var(--accent)}
+.hidden{display:none!important}
+a{color:var(--accent)}
+
+/* ── Layout ── */
+#app{display:flex;flex-direction:column;height:100vh}
+header{display:flex;align-items:center;gap:.5em;padding:.5em 1em;border-bottom:1px solid var(--border);background:var(--surface);flex-shrink:0}
+.logo{font-weight:700;font-size:1.1em;color:var(--accent);flex:1}
+.icon-btn{background:none;color:var(--muted);padding:.4em;font-size:1.1em;border-radius:6px}
+.icon-btn:hover{color:var(--text);background:var(--bg)}
+#sidebar{width:200px;flex-shrink:0;border-right:1px solid var(--border);overflow:auto;background:var(--surface);padding:.5em;font-size:.9em}
+.doc-item{padding:.35em .7em;border-radius:5px;cursor:pointer;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.doc-item:hover{background:var(--bg)}
+.doc-item.active{background:var(--accent);color:#fff}
+#editor{flex:1;overflow:auto;padding:2em 3em}
+#doc-title{font-size:1.8em;font-weight:700;border:none;background:transparent;width:100%;padding:0 0 .3em;margin-bottom:.5em;color:var(--text);border-bottom:2px solid var(--border)}
+#doc-title:focus{outline:none;border-bottom-color:var(--accent)}
+
+/* ── Blocks ── */
+.block{position:relative;padding:.15em 0 .15em 1.5em;cursor:text;min-height:1.6em;line-height:1.7;border-radius:4px}
+.block:hover{background:rgba(37,99,235,.03)}
+.block:focus-within{background:rgba(37,99,235,.05)}
+.drag{position:absolute;left:.2em;top:50%;transform:translateY(-50%);color:var(--border);cursor:grab;font-size:.8em;opacity:0;transition:opacity .1s}
+.block:hover .drag{opacity:1}
+.content{min-width:3em;outline:none;white-space:pre-wrap;word-break:break-word;display:inline;width:100%}
+.content:empty::before{content:attr(data-placeholder);color:var(--muted);font-style:italic;pointer-events:none}
+.block.h1 .content,.block.h2 .content,.block.h3 .content{display:block;font-weight:700}
+.block.h1 .content{font-size:1.5em}
+.block.h2 .content{font-size:1.25em;font-weight:600}
+.block.h3 .content{font-size:1.1em;font-weight:600}
+.block.code .content{background:var(--code-bg);color:var(--code-text);padding:.8em 1em;border-radius:6px;display:block;font-family:monospace;font-size:.88em;overflow:auto}
+.block.quote .content{border-left:3px solid var(--accent);padding-left:1em;color:var(--muted);font-style:italic;display:block}
+.block.callout .content{background:rgba(37,99,235,.06);border-left:3px solid var(--accent);padding:.5em 1em;border-radius:0 6px 6px 0;display:block}
+.block .content a{color:var(--accent);text-decoration:underline}
+
+/* ── Search ── */
+#search-modal{position:fixed;inset:0;background:rgba(0,0,0,.4);display:flex;align-items:flex-start;justify-content:center;padding-top:15vh;z-index:200}
+#search-box{background:var(--surface);border-radius:8px;width:min(560px,92vw);box-shadow:0 25px 50px rgba(0,0,0,.25)}
+#search-input{width:100%;border:none;border-bottom:1px solid var(--border);border-radius:8px 8px 0 0;padding:.8em 1em;font-size:1.1em}
+#search-input:focus{outline:none}
+#search-results{max-height:380px;overflow:auto}
+.result{padding:.6em 1em;cursor:pointer;border-bottom:1px solid var(--border)}
+.result:hover,.result.active{background:var(--accent);color:#fff}
+.result:last-child{border-bottom:none}
+.result .title{font-weight:600}
+.result .snippet{font-size:.85em;color:var(--muted);margin-top:.2em}
+.result:hover .snippet{color:rgba(255,255,255,.7)}
+.search-empty{padding:1em;text-align:center;color:var(--muted)}
+.search-hint{padding:.4em 1em;font-size:.8em;color:var(--muted)}
+
+/* ── Auth ── */
+#auth-screen{display:flex;align-items:center;justify-content:center;height:100vh;background:var(--bg)}
+.auth-card{background:var(--surface);padding:2em;border-radius:12px;box-shadow:0 4px 24px rgba(0,0,0,.1);width:min(380px,92vw)}
+.auth-card h1{font-size:1.5em;margin-bottom:.15em}
+.auth-card p{color:var(--muted);font-size:.9em;margin-bottom:1.5em}
+.auth-card label{display:block;margin-bottom:.8em}
+.auth-card label span{display:block;font-size:.8em;margin-bottom:.2em;color:var(--muted)}
+.auth-card button{width:100%;padding:.7em;margin-top:.5em;font-size:1em}
+.alt{text-align:center;margin-top:1em;font-size:.85em;color:var(--muted)}
+.alt a{color:var(--accent);cursor:pointer}
+
+/* ── Toast ── */
+#toast{position:fixed;bottom:1.5em;right:1.5em;background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:.6em 1em;box-shadow:var(--shadow);font-size:.9em;z-index:300;animation:slideUp .2s}
+@keyframes slideUp{from{transform:translateY(1em);opacity:0}to{transform:none;opacity:1}}
+
+/* ── Section headers ── */
+.section-label{font-size:.7em;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);padding:.5em .7em .3em}
+
+/* ── Backlinks ── */
+#backlinks{background:var(--bg);border-top:1px solid var(--border);padding:.8em 1em;font-size:.85em;color:var(--muted)}
+#backlinks h4{font-size:.75em;text-transform:uppercase;letter-spacing:.08em;margin-bottom:.4em}
+.bl-item{padding:.2em 0}
+.bl-item a{color:var(--accent);cursor:pointer;text-decoration:underline}
+
+/* ── Empty state ── */
+.empty-state{text-align:center;padding:3em;color:var(--muted)}
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="auth-screen"></div>
+  <div id="main-app" class="hidden" style="display:flex;flex-direction:column;height:100vh">
+    <header>
+      <div class="logo">NueroNote</div>
+      <span id="user-info" style="font-size:.8em;color:var(--muted);margin-right:auto"></span>
+      <button class="icon-btn" id="btn-theme" title="切换主题">&#968;</button>
+      <button class="icon-btn" id="btn-search" title="搜索 (Ctrl+Shift+F)">&#8984;</button>
+      <button class="icon-btn" id="btn-new" title="新建 (Ctrl+N)">+</button>
+    </header>
+    <div style="display:flex;flex:1;overflow:hidden">
+      <nav id="sidebar">
+        <div class="section-label">&#128196; 文档</div>
+        <div id="doc-list"></div>
+        <div class="section-label" style="margin-top:.5em">&#128197; 每日笔记</div>
+        <div id="daily-list"></div>
+      </nav>
+      <main id="editor">
+        <div id="empty-state" class="empty-state">
+          选择一篇笔记或 <a href="#" onclick="newDoc();return false">新建文档</a>
+          &nbsp;&middot;&nbsp; <a href="#" onclick="openDaily();return false">今日日记 (Ctrl+D)</a>
+        </div>
+        <div id="editor-inner" class="hidden">
+          <input id="doc-title" placeholder="无标题" autocomplete="off" spellcheck="false">
+          <div id="blocks-container"></div>
+        </div>
+      </main>
+    </div>
+    <div id="backlinks" class="hidden">
+      <h4>&#128279; 反链</h4>
+      <div id="backlink-items"></div>
+    </div>
+  </div>
+</div>
+
+<div id="search-modal" class="hidden">
+  <div id="search-box">
+    <input id="search-input" placeholder="搜索文档标题和内容..." autofocus autocomplete="off">
+    <div id="search-results"><div class="search-empty">输入关键词搜索...</div></div>
+    <div class="search-hint">Esc 关闭 &nbsp;|&nbsp; Enter 打开 &nbsp;|&nbsp; &#8593;&#8595; 导航</div>
+  </div>
+</div>
+
+<div id="toast" class="hidden"></div>
+
+<script>
+(function() {
+'use strict';
+var API = '/api/v1';
+
+// ─── State ─────────────────────────────────────────────────────────
+var vault = null;         // FluxVault instance (plain object)
+var token = null;
+var userId = null;
+var currentDocId = null;
+var dark = false;
+var editingBlockId = null;
+var searchIdx = 0;
+var searchResults = [];
+var saveTimer = null;
+var passwordCache = null; // 缓存密码用于重新密封
+
+// ─── Helpers ───────────────────────────────────────────────────────
+function $(s) { return document.querySelector(s); }
+function $$(s) { return document.querySelectorAll(s); }
+
+function esc(s) {
+  if (s == null) return '';
+  return String(s)
+    .replace(/&/g,'&amp;')
+    .replace(/</g,'&lt;')
+    .replace(/>/g,'&gt;')
+    .replace(/"/g,'&quot;');
+}
+
+function uid(prefix) {
+  var rand = new Uint8Array(12);
+  crypto.getRandomValues(rand);
+  var b64 = btoa(String.fromCharCode.apply(null, rand)).replace(/[+/=]/g,'_').slice(0,16);
+  return prefix ? prefix + '_' + b64 : b64;
+}
+
+function toast(msg, dur) {
+  var el = $('#toast');
+  el.textContent = msg;
+  el.classList.remove('hidden');
+  clearTimeout(el._t);
+  el._t = setTimeout(function() { el.classList.add('hidden'); }, dur || 2500);
+}
+
+// ─── Client-side Vault (mirrors Python FluxVault logic) ───────────
+var SALT_LEN = 16;
+var KEY_LEN = 32;
+var NONCE_LEN = 12;
+var PBKDF2_ITER = 100000;
+
+function vaultDeriveKey(password, saltBytes) {
+  return crypto.subtle.importKey(
+    'raw', new TextEncoder().encode(password), 'PBKDF2', false, ['deriveKey']
+  ).then(function(keyMaterial) {
+    return crypto.subtle.deriveKey(
+      { name:'PBKDF2', salt:saltBytes, iterations:PBKDF2_ITER, hash:'SHA-256' },
+      keyMaterial,
+      { name:'AES-GCM', length:256 },
+      false,
+      ['encrypt','decrypt']
+    );
+  });
+}
+
+function vaultKeyCheck(password, saltBytes) {
+  // HKDF-like key derivation for key check (fast, no iteration)
+  var enc = new TextEncoder();
+  return crypto.subtle.importKey('raw', enc.encode(password), {name:'HMAC', hash:'SHA-256'}, false, ['sign'])
+    .then(function(key) {
+      return crypto.subtle.sign('HMAC', key, enc.encode('NueroNote:v1:key-check'));
+    })
+    .then(function(sig) {
+      return btoa(String.fromCharCode.apply(null, new Uint8Array(sig))).replace(/[+=]/g,'_').slice(0,44);
+    });
+}
+
+function aesEncrypt(key, plaintext) {
+  var nonce = crypto.getRandomValues(new Uint8Array(NONCE_LEN));
+  return crypto.subtle.encrypt(
+    { name:'AES-GCM', iv:nonce },
+    key,
+    new TextEncoder().encode(plaintext)
+  ).then(function(ct) {
+    return {
+      nonce: btoa(String.fromCharCode.apply(null, nonce)).replace(/[+=]/g,'_'),
+      ciphertext: btoa(String.fromCharCode.apply(null, new Uint8Array(ct))).replace(/[+=]/g,'_'),
+    };
+  });
+}
+
+function aesDecrypt(key, nonceB64, ctB64) {
+  var nonce = Uint8Array.from(atob(nonceB64.replace(/_/g,'/')), function(c) { return c.charCodeAt(0); });
+  var ct = Uint8Array.from(atob(ctB64.replace(/_/g,'/')), function(c) { return c.charCodeAt(0); });
+  return crypto.subtle.decrypt({ name:'AES-GCM', iv:nonce }, key, ct)
+    .then(function(pt) { return new TextDecoder().decode(pt); });
+}
+
+// ─── Client Vault Object ───────────────────────────────────────────
+function createVault(password) {
+  var v = {
+    _salt: null,
+    _key: null,
+    _vault: null,
+    _data: null,
+    _password: password,
+    _ready: false,
+  };
+  return v;
+}
+
+function vaultCreate(v, vaultJson) {
+  // vaultJson is the sealed EncryptedVault dict
+  v._vault = vaultJson;
+  v._salt = Uint8Array.from(atob(vaultJson.salt.replace(/_/g,'/')), function(c){return c.charCodeAt(0);});
+  v._data = {
+    documents: {},
+    blocks: {},
+    daily: {},
+    flashcards: [],
+    templates: {},
+    tags: {},
+  };
+  v._ready = true;
+}
+
+function vaultUnlock(v, password, vaultJson) {
+  v._vault = vaultJson;
+  var saltBytes = Uint8Array.from(atob(vaultJson.salt.replace(/_/g,'/')), function(c){return c.charCodeAt(0);});
+  v._salt = saltBytes;
+  v._password = password;
+
+  return vaultDeriveKey(password, saltBytes)
+    .then(function(key) {
+      v._key = key;
+      return vaultKeyCheck(password, saltBytes);
+    })
+    .then(function(keyCheck) {
+      // Check key
+      var serverCheck = vaultJson.check;
+      // Constant time compare
+      if (keyCheck !== serverCheck) {
+        return Promise.reject(new Error('wrong password'));
+      }
+      // Decrypt vault
+      return aesDecrypt(v._key, vaultJson.nonce, vaultJson.ciphertext);
+    })
+    .then(function(plaintext) {
+      v._data = JSON.parse(plaintext);
+      v._ready = true;
+      return true;
+    })
+    .catch(function(err) {
+      v._ready = false;
+      if (err.message === 'wrong password') return false;
+      return Promise.reject(err);
+    });
+}
+
+function vaultSeal(v) {
+  if (!v._ready || !v._key) return Promise.reject(new Error('vault not ready'));
+  var plaintext = JSON.stringify(v._data);
+  return aesEncrypt(v._key, plaintext)
+    .then(function(enc) {
+      return vaultKeyCheck(v._password, v._salt);
+    })
+    .then(function(keyCheck) {
+      v._vault = {
+        v: 1,
+        alg: 'AES-256-GCM',
+        salt: btoa(String.fromCharCode.apply(null, v._salt)).replace(/[+=]/g,'_'),
+        nonce: arguments[0] ? arguments[0].nonce : v._vault.nonce,
+        ciphertext: arguments[0] ? arguments[0].ciphertext : v._vault.ciphertext,
+        check: keyCheck,
+      };
+      // Re-encrypt with the keyCheck derived from the same password
+      // Actually we need to re-do the encryption with a proper nonce
+      // The keyCheck is just for verification, not encryption
+      // Fix: store the encryption result properly
+      var encData = arguments[0];
+      v._vault.nonce = encData.nonce;
+      v._vault.ciphertext = encData.ciphertext;
+      return v._vault;
+    });
+}
+
+function vaultCreateDoc(v, title) {
+  var id = uid('d');
+  var now = Date.now();
+  v._data.documents[id] = {
+    id: id,
+    title: title || '\u65e0\u6807\u9898',
+    blockIds: [],
+    tags: [],
+    created: now,
+    updated: now,
+  };
+  return id;
+}
+
+function vaultCreateBlock(v, type, content, docId) {
+  var id = uid('b');
+  var now = Date.now();
+  v._data.blocks[id] = {
+    id: id,
+    type: type || 'p',
+    content: content || '',
+    attrs: {},
+    children: [],
+    docId: docId || null,
+    created: now,
+    updated: now,
+  };
+  return id;
+}
+
+function vaultAddBlockToDoc(v, docId, blockId, afterBlockId) {
+  var doc = v._data.documents[docId];
+  if (!doc) return;
+  if (afterBlockId && doc.blockIds.indexOf(afterBlockId) >= 0) {
+    var idx = doc.blockIds.indexOf(afterBlockId);
+    doc.blockIds.splice(idx + 1, 0, blockId);
+  } else {
+    doc.blockIds.push(blockId);
+  }
+  if (v._data.blocks[blockId]) v._data.blocks[blockId].docId = docId;
+  doc.updated = Date.now();
+}
+
+function vaultGetDoc(v, id) { return v._data.documents[id]; }
+function vaultGetBlock(v, id) { return v._data.blocks[id]; }
+function vaultSaveBlock(v, id, data) { v._data.blocks[id] = data; }
+function vaultSaveDoc(v, id, data) { v._data.documents[id] = data; }
+
+function vaultGetAllDocs(v) {
+  return Object.values(v._data.documents).sort(function(a,b){ return b.updated - a.updated; });
+}
+
+function vaultGetAllDaily(v) {
+  return Object.entries(v._data.daily || {})
+    .sort(function(a,b){ return b[0].localeCompare(a[0]); })
+    .map(function(d){ return {date:d[0], docId:d[1], doc:v._data.documents[d[1]]}; })
+    .filter(function(d){ return !!d.doc; });
+}
+
+function vaultOpenDaily(v) {
+  var d = new Date().toISOString().slice(0,10);
+  var daily = v._data.daily || (v._data.daily = {});
+  var docId = daily[d];
+  if (!docId || !v._data.documents[docId]) {
+    docId = vaultCreateDoc(v, '\u2605 ' + d + ' \u65e5\u8bb0');
+    daily[d] = docId;
+    var bId = vaultCreateBlock(v, 'p',
+      '## \u270d \u5de5\u4f5c\u65e5\u5fd7\n\n### \u4eca\u65e5\u5b8c\u6210\n- [ ] \n\n### \u660e\u65e5\u8ba1\u5212\n- [ ]\n',
+      docId
+    );
+    v._data.documents[docId].blockIds = [bId];
+  }
+  return docId;
+}
+
+function vaultSearch(v, q) {
+  if (!q || !q.trim()) return [];
+  var qL = q.toLowerCase().trim();
+  var results = [];
+  for (var id in v._data.documents) {
+    var doc = v._data.documents[id];
+    var titleL = (doc.title || '').toLowerCase();
+    if (titleL.indexOf(qL) >= 0) {
+      results.push({docId:id, title:doc.title, snippet:'', type:'title', score:10});
+      continue;
+    }
+    var text = vaultDocText(v, doc);
+    var idx = text.toLowerCase().indexOf(qL);
+    if (idx >= 0) {
+      var start = Math.max(0, idx - 30);
+      results.push({docId:id, title:doc.title, snippet:text.slice(start, start+80), type:'content', score:1});
+    }
+  }
+  results.sort(function(a,b){ return b.score - a.score; });
+  return results.slice(0, 50);
+}
+
+function vaultDocText(v, doc) {
+  var parts = [doc.title || ''];
+  var ids = doc.blockIds || [];
+  for (var i = 0; i < ids.length; i++) {
+    var b = v._data.blocks[ids[i]];
+    if (b) parts.push(b.content || '');
+  }
+  return parts.join(' ');
+}
+
+function vaultGetBacklinks(v, docId) {
+  var doc = v._data.documents[docId];
+  if (!doc) return [];
+  var title = doc.title || '';
+  var results = [];
+  var seen = {};
+  seen[docId] = true;
+  for (var bid in v._data.blocks) {
+    var block = v._data.blocks[bid];
+    if (block.content && block.content.indexOf('[[' + title + ']]') >= 0) {
+      var d = v._data.documents[block.docId];
+      if (d && !seen[d.id]) {
+        seen[d.id] = true;
+        results.push({docId:d.id, title:d.title, content:(block.content||'').slice(0,100)});
+      }
+    }
+  }
+  return results;
+}
+
+function vaultDeleteBlock(v, blockId) {
+  var block = v._data.blocks[blockId];
+  if (!block) return;
+  var docId = block.docId;
+  if (docId && v._data.documents[docId]) {
+    v._data.documents[docId].blockIds =
+      v._data.documents[docId].blockIds.filter(function(id){ return id !== blockId; });
+  }
+  delete v._data.blocks[blockId];
+}
+
+// ─── Auth UI ───────────────────────────────────────────────────────
+function renderAuth() {
+  $('#auth-screen').innerHTML =
+    '<div class="auth-card">' +
+    '<h1>&#128274; NueroNote</h1>' +
+    '<p>\u7aef\u5230\u7aef\u52a0\u5bc6\u7b14\u8bb0\uff0c\u670d\u52a1\u5668\u6c38\u8fdc\u4e0d\u77e5\u9053\u4f60\u5199\u4e86\u4ec0\u4e48</p>' +
+    '<label><span>\u90ae\u7bb1</span><input type="email" id="auth-email" placeholder="your@email.com" autocomplete="email"></label>' +
+    '<label><span>\u5bc6\u7801\uff08\u7528\u4e8e\u52a0\u5bc6\uff0c\u6c38\u4e0d\u4e0a\u4f20</span><input type="password" id="auth-password" placeholder="\u81f3\u5c11 8 \u4f4d" autocomplete="new-password"></label>' +
+    '<button class="primary" onclick="doRegister()">&#21019\u5efa\u8d26\u6237</button>' +
+    '<div class="alt">\u240e\u5df2\u6709\u8d26\u6237\uff1f;<a href="#" onclick="renderLogin();return false">&#767b\u5f55</a></div>' +
+    '</div>';
+}
+
+function renderLogin() {
+  $('#auth-screen').innerHTML =
+    '<div class="auth-card">' +
+    '<h1>&#128274; NueroNote</h1>' +
+    '<p>\u8f93\u5165\u90ae\u7bb1\u5bc6\u7801\uff0c\u89e3\u9501\u4f60\u7684\u52a0\u5bc6\u7b14\u8bb0</p>' +
+    '<label><span>\u90ae\u7bb1</span><input type="email" id="auth-email" placeholder="your@email.com" autocomplete="email"></label>' +
+    '<label><span>\u5bc6\u7801\uff08\u52a0\u5bc6\u5bc6\u94a5</span><input type="password" id="auth-password" placeholder="\u4f60\u7684\u52a0\u5bc6\u5bc6\u94a5" autocomplete="current-password"></label>' +
+    '<button class="primary" onclick="doLogin()">&#89e3\u9501\u7b14\u8bb0</button>' +
+    '<div class="alt">\u65b0\u7528\u6237\uff1f;<a href="#" onclick="renderAuth();return false">&#27880\u518c</a></div>' +
+    '</div>';
+}
+
+function renderLoading(msg) {
+  $('#auth-screen').innerHTML =
+    '<div class="auth-card" style="text-align:center;padding:3em">' +
+    '<p style="color:var(--muted)">' + (msg||'\u52a0\u8f7d\u4e2d...') + '</p>' +
+    '</div>';
+}
+
+async function doRegister() {
+  var email = $('#auth-email') ? $('#auth-email').value.trim() : '';
+  var password = $('#auth-password') ? $('#auth-password').value : '';
+  if (!email || password.length < 8) { toast('\u5bc6\u7801\u81f3\u5c11 8 \u4f4d'); return; }
+
+  renderLoading('\u6b63\u5728\u521b\u5efa\u52a0\u5bc6\u7b14\u8bb0...');
+
+  try {
+    // Create vault
+    var v = createVault(password);
+    var vaultJson = await vaultSeal(v);
+    vaultJson = v._vault; // Get the properly sealed vault
+
+    var resp = await fetch(API + '/auth/register', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({email:email, vault:vaultJson})
+    });
+    var data = await resp.json();
+    if (data.error) { toast(data.error); renderAuth(); return; }
+
+    // 立即解锁并保存到本地
+    var v2 = createVault(password);
+    await vaultUnlock(v2, password, vaultJson);
+    vault = v2;
+    passwordCache = password;
+    token = data.token;
+    userId = data.user_id;
+    localStorage.setItem('flux_token', token);
+    localStorage.setItem('flux_uid', userId);
+
+    renderApp();
+    toast('\u8d26\u6237\u521b\u5efa\u6210\u529f\uff01');
+  } catch(err) {
+    toast('\u521b\u5efa\u5931\u8d25: ' + err.message);
+    renderAuth();
+  }
+}
+
+async function doLogin() {
+  var email = $('#auth-email') ? $('#auth-email').value.trim() : '';
+  var password = $('#auth-password') ? $('#auth-password').value : '';
+  if (!email || !password) { toast('\u8bf7\u586b\u5199\u90ae\u7bb1\u548c\u5bc6\u7801'); return; }
+
+  renderLoading('\u6b63\u5728\u89e3\u5bc6...');
+
+  try {
+    // 获取 token
+    var resp = await fetch(API + '/auth/login', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({email:email})
+    });
+    var data = await resp.json();
+    if (data.error) { toast(data.error); renderLogin(); return; }
+
+    token = data.token;
+    userId = data.user_id;
+    localStorage.setItem('flux_token', token);
+    localStorage.setItem('flux_uid', userId);
+
+    // 获取 vault
+    var vaultResp = await fetch(API + '/vault', {
+      headers:{'Authorization':'Bearer ' + token}
+    });
+    var vaultData = await vaultResp.json();
+    if (vaultData.error) { toast(vaultData.error); renderLogin(); return; }
+
+    // 解锁 vault
+    var v = createVault(password);
+    var ok = await vaultUnlock(v, password, vaultData.vault);
+    if (!ok) {
+      toast('\u5bc6\u7801\u9519\u8bef\uff0c\u65e0\u6cd5\u89e3\u5bc6');
+      localStorage.removeItem('flux_token');
+      localStorage.removeItem('flux_uid');
+      renderLogin();
+      return;
+    }
+    vault = v;
+    passwordCache = password;
+
+    renderApp();
+    toast('\u6b22\u8fce\u56de\u6765\uff01');
+  } catch(err) {
+    toast('\u767b\u5f55\u5931\u8d25: ' + err.message);
+    renderLogin();
+  }
+}
+
+// ─── App UI ───────────────────────────────────────────────────────
+function renderApp() {
+  $('#auth-screen').classList.add('hidden');
+  var main = $('#main-app');
+  main.classList.remove('hidden');
+  main.style.display = 'flex';
+  main.style.flexDirection = 'column';
+  $('#user-info').textContent = (localStorage.getItem('flux_uid')||'').slice(0,10) + '...';
+  renderDocList();
+  renderDailyList();
+  $('#empty-state').style.display = 'block';
+  $('#editor-inner').classList.add('hidden');
+  $('#backlinks').classList.add('hidden');
+  currentDocId = null;
+}
+
+function renderDocList() {
+  if (!vault) return;
+  var docs = vaultGetAllDocs(vault).slice(0,50);
+  var html = docs.length ? docs.map(function(d) {
+    return '<div class="doc-item' + (d.id===currentDocId?' active':'') + '" onclick="openDoc(\'' + d.id + '\')">' + esc(d.title) + '</div>';
+  }).join('') : '<div style="padding:.5em .7em;color:var(--muted);font-size:.85em">\u6682\u65e0\u6587\u6863</div>';
+  $('#doc-list').innerHTML = html;
+}
+
+function renderDailyList() {
+  if (!vault) return;
+  var dailys = vaultGetAllDaily(vault).slice(0,7);
+  $('#daily-list').innerHTML = dailys.map(function(d) {
+    return '<div class="doc-item" onclick="openDoc(\'' + d.docId + '\')">' + esc(d.date) + '</div>';
+  }).join('');
+}
+
+// ─── Editor ────────────────────────────────────────────────────────
+var blockTypeMap = {
+  h1:{cls:'h1',placeholder:'\u6807\u9891'},
+  h2:{cls:'h2',placeholder:'\u6807\u98912'},
+  h3:{cls:'h3',placeholder:'\u6807\u98913'},
+  p:{cls:'p',placeholder:'\u7c7b\u578b/ \u6216 [[ \u5199\u5185\u5bb9'},
+  code:{cls:'code',placeholder:'\u4ee3\u7801'},
+  quote:{cls:'quote',placeholder:'\u5f15\u7528'},
+  callout:{cls:'callout',placeholder:'[!note] \u63d0\u793a'},
+  divider:{cls:'divider',placeholder:''},
+};
+
+function getBlockCls(type) {
+  return blockTypeMap[type] ? blockTypeMap[type].cls : 'p';
+}
+
+function getBlockPlaceholder(type) {
+  return blockTypeMap[type] ? blockTypeMap[type].placeholder : '\u7c7b\u578b/ \u6216 [[ \u5199\u5185\u5bb9';
+}
+
+async function openDoc(docId) {
+  if (currentDocId === docId) return;
+  currentDocId = docId;
+  var doc = vaultGetDoc(vault, docId);
+  if (!doc) return;
+  $('#empty-state').style.display = 'none';
+  $('#editor-inner').classList.remove('hidden');
+  $('#doc-title').value = doc.title || '';
+  $('#blocks-container').innerHTML = '';
+
+  var ids = doc.blockIds || [];
+  for (var i = 0; i < ids.length; i++) {
+    var block = vaultGetBlock(vault, ids[i]);
+    if (block) await addBlockEl(block);
+  }
+  if (!ids.length) await addNewBlock('p', null);
+  renderDocList();
+  renderBacklinks(docId);
+  scheduleSave();
+}
+
+async function addBlockEl(block) {
+  var container = $('#blocks-container');
+  var div = document.createElement('div');
+  div.className = 'block ' + getBlockCls(block.type);
+  div.dataset.id = block.id;
+
+  var inner = '<span class="drag">&#8942;&#8942;</span>';
+
+  if (block.type === 'divider') {
+    inner += '<hr style="border:none;border-top:2px solid var(--border);margin:.5em 0;pointer-events:none">';
+    div.innerHTML = inner;
+    div.onclick = function() { addNewBlock('p', block.id); };
+    container.appendChild(div);
+    return;
+  }
+
+  var placeholder = getBlockPlaceholder(block.type);
+  var content = renderInline(block.content || '');
+  inner += '<div class="content" contenteditable="true" data-placeholder="' + placeholder + '" data-type="' + block.type + '">' + content + '</div>';
+  div.innerHTML = inner;
+
+  var contentEl = div.querySelector('.content');
+  contentEl.onfocus = (function(bid){ return function(){ editingBlockId = bid; }; })(block.id);
+  contentEl.onblur = function() {
+    setTimeout(function(){ if (editingBlockId === block.id) editingBlockId = null; }, 150);
+  };
+  contentEl.oninput = (function(bid, el){ return function() {
+    var b = vaultGetBlock(vault, bid);
+    if (b) { b.content = el.innerText; b.updated = Date.now(); }
+    parseInline(el);
+    scheduleSave();
+  }; })(block.id, contentEl);
+  contentEl.onkeydown = (function(bid){ return function(e){ handleBlockKey(e, bid); }; })(block.id);
+  contentEl.onpaste = function(e) {
+    e.preventDefault();
+    document.execCommand('insertText', false, (e.clipboardData||window.clipboardData).getData('text/plain'));
+  };
+  contentEl.onclick = function(e) {
+    if (contentEl.innerText === '/' && !e.shiftKey) {
+      e.preventDefault();
+      showSlashMenu(contentEl, block.id);
+    }
+  };
+
+  container.appendChild(div);
+  contentEl.focus();
+}
+
+function renderInline(content) {
+  if (!content) return '';
+  // Escape HTML first
+  content = esc(content);
+  // Wiki links [[title]]
+  content = content.replace(/\[\[([^\]]+)\]\]/g, '<a href="#" onclick="openByTitle(\'$1\');return false" style="color:var(--accent)">[[$1]]</a>');
+  // Inline code `code`
+  content = content.replace(/`([^`]+)`/g, '<code style="background:var(--bg);padding:.1em .3em;border-radius:3px;font-size:.88em">$1</code>');
+  return content;
+}
+
+function parseInline(el) {
+  el.style.outline = el.innerText.indexOf('[[') >= 0 ? '1px dashed var(--accent)' : '';
+}
+
+function handleBlockKey(e, blockId) {
+  var el = e.target;
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    var sel = window.getSelection();
+    var offset = sel.anchorOffset;
+    var text = el.innerText;
+    var before = text.slice(0, offset);
+    var after = text.slice(offset);
+
+    // Update current block
+    var block = vaultGetBlock(vault, blockId);
+    if (block) block.content = before;
+
+    // Create new block
+    var newId = vaultCreateBlock(vault, 'p', after, currentDocId);
+    vaultAddBlockToDoc(vault, currentDocId, newId, blockId);
+
+    // Re-render current block content
+    el.innerHTML = esc(before);
+
+    // Insert new block element
+    var newEl = document.createElement('div');
+    newEl.className = 'block p';
+    newEl.dataset.id = newId;
+    newEl.innerHTML = '<span class="drag">&#8942;&#8942;</span><div class="content" contenteditable="true" data-placeholder="\u7c7b\u578b/ \u6216 [[ \u5199\u5185\u5bb9"></div>';
+    el.closest('.block').after(newEl);
+    var newContentEl = newEl.querySelector('.content');
+    setupContentEl(newContentEl, newId);
+    newContentEl.focus();
+    scheduleSave();
+    return;
+  }
+
+  if (e.key === 'Backspace' && el.innerText === '') {
+    e.preventDefault();
+    var doc = vaultGetDoc(vault, currentDocId);
+    if (!doc || doc.blockIds.length <= 1) return;
+    var idx = doc.blockIds.indexOf(blockId);
+    var prevId = idx > 0 ? doc.blockIds[idx - 1] : null;
+    vaultDeleteBlock(vault, blockId);
+    el.closest('.block').remove();
+    if (prevId) {
+      var prevEl = document.querySelector('[data-id="' + prevId + '"] .content');
+      if (prevEl) prevEl.focus();
+    }
+    scheduleSave();
+  }
+}
+
+function setupContentEl(el, blockId) {
+  el.onfocus = (function(bid){ return function(){ editingBlockId = bid; }; })(blockId);
+  el.onblur = function() {
+    setTimeout(function(){ if (editingBlockId === blockId) editingBlockId = null; }, 150);
+  };
+  el.oninput = (function(bid, cel){ return function() {
+    var b = vaultGetBlock(vault, bid);
+    if (b) { b.content = cel.innerText; b.updated = Date.now(); }
+    parseInline(cel);
+    scheduleSave();
+  }; })(blockId, el);
+  el.onkeydown = (function(bid){ return function(e){ handleBlockKey(e, bid); }; })(blockId);
+  el.onpaste = function(e) {
+    e.preventDefault();
+    document.execCommand('insertText', false, (e.clipboardData||window.clipboardData).getData('text/plain'));
+  };
+  el.onclick = function(e) {
+    if (el.innerText === '/') { showSlashMenu(el, blockId); e.preventDefault(); }
+  };
+}
+
+function showSlashMenu(el, blockId) {
+  var rect = el.getBoundingClientRect();
+  var menu = $('#slash-menu') || createSlashMenu();
+  menu.style.left = rect.left + 'px';
+  menu.style.top = (rect.bottom + 4) + 'px';
+  menu.innerHTML = [
+    {type:'h1',label:'\u6807\u98911',hint:'# '},
+    {type:'h2',label:'\u6807\u98912',hint:'## '},
+    {type:'h3',label:'\u6807\u98913',hint:'### '},
+    {type:'p',  label:'\u6b63\u6587',hint:'\u6587\u672c'},
+    {type:'code',label:'\u4ee3\u7801\u5757',hint:'\u4ee3\u7801'},
+    {type:'quote',label:'\u5f15\u7528',hint:'> '},
+    {type:'callout',label:'\u63d0\u793a\u6846',hint:'[!note]'},
+    {type:'divider',label:'\u5206\u9694\u7ebf',hint:'---'},
+  ].map(function(item, i) {
+    return '<div class="slash-item' + (i===0?' active':'') + '" data-type="' + item.type + '">' + item.label + '<span class="slash-hint">' + item.hint + '</span></div>';
+  }).join('');
+  menu.classList.remove('hidden');
+  menu._blockId = blockId;
+  menu.querySelectorAll('.slash-item').forEach(function(item) {
+    item.onclick = function() {
+      var type = item.dataset.type;
+      menu.classList.add('hidden');
+      if (type === 'divider') { addNewBlock('divider', blockId); return; }
+      var block = vaultGetBlock(vault, blockId);
+      if (block) {
+        block.type = type;
+        var blockEl = document.querySelector('[data-id="' + blockId + '"]');
+        if (blockEl) blockEl.className = 'block ' + getBlockCls(type);
+        var contentEl = blockEl ? blockEl.querySelector('.content') : null;
+        if (contentEl) {
+          contentEl.dataset.placeholder = getBlockPlaceholder(type);
+          contentEl.dataset.type = type;
+        }
+      }
+      scheduleSave();
+    };
+  });
+}
+
+function createSlashMenu() {
+  var menu = document.createElement('div');
+  menu.id = 'slash-menu';
+  menu.style.cssText = 'position:fixed;background:var(--surface);border:1px solid var(--border);border-radius:6px;box-shadow:var(--shadow);min-width:160px;max-height:300px;overflow:auto;z-index:100;font-size:.9em;';
+  menu.innerHTML = '<style>.slash-item{padding:.4em .8em;cursor:pointer;border-radius:4px}.slash-item:hover,.slash-item.active{background:var(--accent);color:#fff}.slash-hint{float:right;color:var(--muted);font-size:.8em}.slash-item:hover .slash-hint{color:rgba(255,255,255,.7)}</style>';
+  document.body.appendChild(menu);
+  menu.addEventListener('mouseleave', function(){ menu.classList.add('hidden'); });
+  return menu;
+}
+
+function closeSlashMenu() {
+  var menu = $('#slash-menu');
+  if (menu) menu.classList.add('hidden');
+}
+
+async function addNewBlock(type, afterBlockId) {
+  if (!currentDocId) return;
+  var id = vaultCreateBlock(vault, type, '', currentDocId);
+  vaultAddBlockToDoc(vault, currentDocId, id, afterBlockId);
+  var block = vaultGetBlock(vault, id);
+  if (block) await addBlockEl(block);
+  scheduleSave();
+  return id;
+}
+
+function openByTitle(title) {
+  var docs = vaultGetAllDocs(vault);
+  var doc = null;
+  for (var i = 0; i < docs.length; i++) {
+    if (docs[i].title === title) { doc = docs[i]; break; }
+  }
+  if (doc) { openDoc(doc.id); return; }
+  var newId = vaultCreateDoc(vault, title);
+  toast('\u5df2\u521b\u5efa: ' + title);
+  openDoc(newId);
+  renderDocList();
+}
+
+function openDaily() {
+  var id = vaultOpenDaily(vault);
+  openDoc(id);
+  renderDailyList();
+}
+
+function newDoc() {
+  var id = vaultCreateDoc(vault, '');
+  openDoc(id);
+  renderDocList();
+  setTimeout(function() { var t = $('#doc-title'); if (t) t.focus(); }, 50);
+}
+
+function renderBacklinks(docId) {
+  var links = vaultGetBacklinks(vault, docId);
+  var panel = $('#backlinks');
+  if (!links || !links.length) { panel.classList.add('hidden'); return; }
+  panel.classList.remove('hidden');
+  $('#backlink-items').innerHTML = links.map(function(l) {
+    return '<div class="bl-item"><a onclick="openDoc(\'' + l.docId + '\')">' + esc(l.title) + '</a>: ' + esc(l.content||'').slice(0,80) + '</div>';
+  }).join('');
+}
+
+// ─── Title ────────────────────────────────────────────────────────
+$('#doc-title').addEventListener('input', function(e) {
+  if (!currentDocId) return;
+  var doc = vaultGetDoc(vault, currentDocId);
+  if (doc) { doc.title = e.target.value; doc.updated = Date.now(); }
+  renderDocList();
+  scheduleSave();
+});
+
+// ─── Save ─────────────────────────────────────────────────────────
+function scheduleSave() {
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(saveVault, 800);
+}
+
+async function saveVault() {
+  if (!vault || !token) return;
+  try {
+    // Re-seal vault
+    var sealed = await vaultSeal(vault);
+    var vaultJson = vault._vault;
+    var resp = await fetch(API + '/vault', {
+      method:'PUT',
+      headers:{'Content-Type':'application/json','Authorization':'Bearer ' + token},
+      body: JSON.stringify({vault:vaultJson, expected_version:1})
+    });
+    if (!resp.ok) {
+      if (resp.status === 409) toast('\u7248\u672c\u51b2\u7a81\uff0c\u5df2\u540c\u6b65\u6700\u65b0\u7248\u672c');
+    }
+  } catch(err) {
+    console.error('save error', err);
+    toast('\u4fdd\u5b58\u5931\u8d25\uff08\u79bb\u7ebf\u6a21\u5f0f\uff0c\u672c\u5730\u5df2\u4fdd\u5b58\uff09');
+  }
+}
+
+// ─── Search ───────────────────────────────────────────────────────
+function openSearch() {
+  $('#search-modal').classList.remove('hidden');
+  $('#search-input').value = '';
+  $('#search-results').innerHTML = '<div class="search-empty">\u8f93\u5165\u5173\u952e\u8bcd\u641c\u7d22...</div>';
+  searchIdx = 0;
+  setTimeout(function() { $('#search-input').focus(); }, 50);
+}
+
+$('#search-input').addEventListener('input', function(e) {
+  var q = e.target.value.trim();
+  if (!q) { $('#search-results').innerHTML = '<div class="search-empty">\u8f93\u5165\u5173\u952e\u8bcd\u641c\u7d22...</div>'; searchResults = []; return; }
+  var results = vaultSearch(vault, q);
+  searchResults = results;
+  if (!results.length) {
+    $('#search-results').innerHTML = '<div class="search-empty">\u6ca1\u6709\u627e\u5230\u76f8\u5173\u7b14\u8bb0</div>';
+    return;
+  }
+  $('#search-results').innerHTML = results.map(function(r, i) {
+    return '<div class="result' + (i===0?' active':'') + '" onclick="pickSearch(' + i + ')"><div class="title">' + esc(r.title) + '</div><div class="snippet">' + esc(r.snippet||'') + '</div></div>';
+  }).join('');
+  searchIdx = 0;
+});
+
+$('#search-input').addEventListener('keydown', function(e) {
+  var items = $$('#search-results .result');
+  if (e.key === 'ArrowDown') {
+    e.preventDefault();
+    searchIdx = Math.min(searchIdx+1, items.length-1);
+    items.forEach(function(it,i){ it.classList.toggle('active', i===searchIdx); });
+  } else if (e.key === 'ArrowUp') {
+    e.preventDefault();
+    searchIdx = Math.max(searchIdx-1, 0);
+    items.forEach(function(it,i){ it.classList.toggle('active', i===searchIdx); });
+  } else if (e.key === 'Enter') {
+    pickSearch(searchIdx);
+  } else if (e.key === 'Escape') {
+    closeSearch();
+  }
+});
+
+function pickSearch(idx) {
+  var r = searchResults[idx];
+  if (!r) return;
+  closeSearch();
+  openDoc(r.docId);
+}
+
+function closeSearch() {
+  $('#search-modal').classList.add('hidden');
+}
+
+// ─── Toolbar buttons ──────────────────────────────────────────────
+$('#btn-theme').addEventListener('click', function() {
+  dark = !dark;
+  document.body.classList.toggle('dark', dark);
+  localStorage.setItem('flux_dark', dark);
+});
+$('#btn-search').addEventListener('click', openSearch);
+$('#btn-new').addEventListener('click', newDoc);
+
+// ─── Global shortcuts ─────────────────────────────────────────────
+document.addEventListener('keydown', function(e) {
+  if ((e.ctrlKey||e.metaKey) && e.shiftKey && e.key === 'F') { e.preventDefault(); openSearch(); return; }
+  if ((e.ctrlKey||e.metaKey) && !editingBlockId && e.key === 'n') { e.preventDefault(); newDoc(); return; }
+  if ((e.ctrlKey||e.metaKey) && e.key === 'd') { e.preventDefault(); openDaily(); return; }
+  if ((e.ctrlKey||e.metaKey) && e.key === 's') { e.preventDefault(); saveVault(); toast('\u5df2\u4fdd\u5b58'); return; }
+  if (e.key === 'Escape') { closeSearch(); closeSlashMenu(); }
+});
+
+// ─── Init ─────────────────────────────────────────────────────────
+function init() {
+  dark = localStorage.getItem('flux_dark') === 'true';
+  if (dark) document.body.classList.add('dark');
+
+  var savedToken = localStorage.getItem('flux_token');
+  var savedUid = localStorage.getItem('flux_uid');
+
+  if (!savedToken || !savedUid) {
+    renderAuth();
+    return;
+  }
+
+  // Try to restore session
+  renderLoading('\u6b63\u5728\u8fde\u63a5...');
+  fetch(API + '/vault', {headers:{'Authorization':'Bearer ' + savedToken}})
+    .then(function(r){ return r.ok ? r.json() : null; })
+    .then(function(data) {
+      if (data && data.vault) {
+        // Vault exists but we need password to unlock
+        renderLogin();
+        $('#auth-password').placeholder = '\u8f93\u5165\u4f60\u7684\u52a0\u5bc6\u5bc6\u94a5\u89e3\u9501\u7b14\u8bb0';
+        toast('\u8bf7\u8f93\u5165\u5bc6\u7801\u89e3\u9501');
+      } else {
+        localStorage.removeItem('flux_token');
+        localStorage.removeItem('flux_uid');
+        renderAuth();
+      }
+    })
+    .catch(function() { renderAuth(); });
+}
+
+init();
+
+window.doRegister = doRegister;
+window.doLogin = doLogin;
+window.newDoc = newDoc;
+window.openDoc = openDoc;
+window.openDaily = openDaily;
+window.openByTitle = openByTitle;
+window.pickSearch = pickSearch;
+
+})();
+</script>
+</body>
+</html>
