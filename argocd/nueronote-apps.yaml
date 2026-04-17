@@ -1,0 +1,132 @@
+# NueroNote ArgoCD Project
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: nueronote
+  namespace: argocd
+spec:
+  description: NueroNote Application Project
+  
+  # 允许部署的目标集群
+  destinationConnections:
+    - name: dev-ack
+      server: https://dev.ack.api.com
+    - name: staging-ack
+      server: https://staging.ack.api.com
+    - name: prod-ack
+      server: https://prod.ack.api.com
+      
+  # 允许的命名空间
+  sourceNamespaces:
+    - nueronote-dev
+    - nueronote-staging
+    - nueronote-prod
+    
+  # 允许的仓库
+  sourceRepos:
+    - https://github.com/trigoldsun/NueroNote
+    - https://github.com/trigoldsun/NueroNote.git
+    
+  # RBAC
+  roles:
+    - name: engineering
+      description: Engineering team - read/write access
+      groups:
+        - engineering@nueronote.com
+    - name: operations
+      description: Operations team - admin access
+      groups:
+        - operations@nueronote.com
+    - name: readonly
+      description: Read-only access
+      groups:
+        - readonly@nueronote.com
+        
+  # 资源过滤
+  resourceWhiteList:
+    - group: ""
+      kinds: ["Namespace", "ConfigMap", "Secret", "Service"]
+    - group: "apps"
+      kinds: ["Deployment", "StatefulSet", "DaemonSet"]
+    - group: "networking.k8s.io"
+      kinds: ["Ingress"]
+    - group: "autoscaling"
+      kinds: ["HorizontalPodAutoscaler"]
+
+---
+
+# NueroNote Backend Application
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: nueronote-backend
+  namespace: argocd
+  labels:
+    app: nueronote
+    component: backend
+spec:
+  project: nueronote
+  
+  source:
+    repoURL: https://github.com/trigoldsun/NueroNote.git
+    targetRevision: HEAD
+    path: kubernetes/overlays/prod
+    
+  destination:
+    server: https://prod.ack.api.com
+    namespace: nueronote-prod
+    
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+      allowEmpty: false
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+      - PruneLast=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m
+        
+  ignoreDifferences:
+    - group: apps
+      kinds:
+        - Deployment
+      jsonPointers:
+        - /spec/replicas
+        
+  metadata:
+    finalizers:
+      - resources-finalizer.argocd.argoproj.io
+
+---
+
+# NueroNote Frontend Application
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: nueronote-frontend
+  namespace: argocd
+  labels:
+    app: nueronote
+    component: frontend
+spec:
+  project: nueronote
+  
+  source:
+    repoURL: https://github.com/trigoldsun/NueroNote.git
+    targetRevision: HEAD
+    path: kubernetes/overlays/prod
+    
+  destination:
+    server: https://prod.ack.api.com
+    namespace: nueronote-prod
+    
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true

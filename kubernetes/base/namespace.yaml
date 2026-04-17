@@ -1,0 +1,31 @@
+# Namespace resources
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: nueronote
+  labels:
+    app: nueronote
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: nueronote-dev
+  labels:
+    app: nueronote
+    environment: development
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: nueronote-staging
+  labels:
+    app: nueronote
+    environment: staging
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: nueronote-prod
+  labels:
+    app: nueronote
+    environment: production

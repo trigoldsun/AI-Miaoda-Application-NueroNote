@@ -1,0 +1,42 @@
+# NueroNote Staging Overlay
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: nueronote-staging
+
+commonLabels:
+  environment: staging
+
+resources:
+  - ../../base/namespace.yaml
+
+patches:
+  - patch: |-
+      - op: replace
+        path: /spec/replicas
+        value: 2
+    target:
+      kind: Deployment
+      name: nueronote-backend
+  - patch: |-
+      - op: replace
+        path: /spec/replicas
+        value: 2
+    target:
+      kind: Deployment
+      name: nueronote-frontend
+
+configMapGenerator:
+  - name: nueronote-config
+    behavior: merge
+    literals:
+      - APP_ENV=staging
+      - LOG_LEVEL=info
+
+images:
+  - name: python
+    newName: registry.cn-shanghai.aliyuncs.com/nueronote/backend
+    newTag: staging
+  - name: nginx
+    newName: registry.cn-shanghai.aliyuncs.com/nueronote/frontend
+    newTag: staging

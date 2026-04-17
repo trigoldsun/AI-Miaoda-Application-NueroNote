@@ -1,0 +1,42 @@
+# NueroNote Development Overlay
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: nueronote-dev
+
+commonLabels:
+  environment: development
+
+resources:
+  - ../../base/namespace.yaml
+
+patches:
+  - patch: |-
+      - op: replace
+        path: /spec/replicas
+        value: 1
+    target:
+      kind: Deployment
+      name: nueronote-backend
+  - patch: |-
+      - op: replace
+        path: /spec/replicas
+        value: 1
+    target:
+      kind: Deployment
+      name: nueronote-frontend
+
+configMapGenerator:
+  - name: nueronote-config
+    behavior: merge
+    literals:
+      - APP_ENV=development
+      - LOG_LEVEL=debug
+
+images:
+  - name: python
+    newName: registry.cn-shanghai.aliyuncs.com/nueronote/backend
+    newTag: dev
+  - name: nginx
+    newName: registry.cn-shanghai.aliyuncs.com/nueronote/frontend
+    newTag: dev

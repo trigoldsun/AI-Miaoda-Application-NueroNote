@@ -1,0 +1,224 @@
+# NueroNote CD Deployment Pipeline - GitHub Actions
+# Backend: Python Flask | Frontend: Vanilla HTML/JS
+# Target: Alibaba Cloud ACK
+
+name: CD Deployment
+
+on:
+  workflow_run:
+    workflows: ["CI Pipeline"]
+    types: [completed]
+    branches: [main, staging, develop]
+    
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to deploy'
+        required: true
+        default: 'staging'
+        type: choice
+        options:
+          - dev
+          - staging
+          - production
+      image_tag:
+        description: 'Image tag to deploy (optional)'
+        required: false
+        type: string
+
+env:
+  REGISTRY: registry.cn-shanghai.aliyuncs.com
+  IMAGE_BACKEND: nueronote/backend
+  IMAGE_FRONTEND: nueronote/frontend
+  ACK_CLUSTER: ${{ vars.ACK_CLUSTER_ID }}
+  ACK_REGION: cn-shanghai
+
+jobs:
+  # ============================================================
+  # Deploy to Development
+  # ============================================================
+  deploy-dev:
+    runs-on: ubuntu-latest
+    environment: development
+    if: github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' && github.ref == 'refs/heads/develop'
+    
+    steps:
+      - name: Checkout infrastructure repo
+        uses: actions/checkout@v4
+        with:
+          repository: trigoldsun/nueronote-ops
+          path: nueronote-ops
+          ref: main
+          
+      - name: Configure kubectl for ACK
+        uses: azure/k8s-set-context@v3
+        with:
+          kubeconfig: ${{ secrets.ACK_KUBECONFIG_DEV }}
+          
+      - name: Deploy with Kustomize
+        run: |
+          cd nueronote-ops/kubernetes/overlays/dev
+          kustomize build . | kubectl apply -f -
+          
+      - name: Verify deployment
+        run: |
+          kubectl rollout status deployment/nueronote-backend -n nueronote-dev --timeout=120s
+          kubectl rollout status deployment/nueronote-frontend -n nueronote-dev --timeout=120s
+          
+      - name: Notify ArgoCD
+        run: |
+          curl -s -X POST ${{ secrets.ARGOCD_SERVER }}/api/v1/applications/nueronote-backend-dev/sync \
+            -H "Authorization: Bearer ${{ secrets.ARGOCD_TOKEN }}" || true
+          curl -s -X POST ${{ secrets.ARGOCD_SERVER }}/api/v1/applications/nueronote-frontend-dev/sync \
+            -H "Authorization: Bearer ${{ secrets.ARGOCD_TOKEN }}" || true
+
+  # ============================================================
+  # Deploy to Staging
+  # ============================================================
+  deploy-staging:
+    runs-on: ubuntu-latest
+    environment: staging
+    if: github.event_name == 'workflow_dispatch' && github.inputs.environment == 'staging'
+    
+    steps:
+      - name: Checkout infrastructure repo
+        uses: actions/checkout@v4
+        with:
+          repository: trigoldsun/nueronote-ops
+          path: nueronote-ops
+          ref: main
+          
+      - name: Configure kubectl for ACK
+        uses: azure/k8s-set-context@v3
+        with:
+          kubeconfig: ${{ secrets.ACK_KUBECONFIG_STAGING }}
+          
+      - name: Deploy with Kustomize
+        run: |
+          cd nueronote-ops/kubernetes/overlays/staging
+          kustomize build . | kubectl apply -f -
+          
+      - name: Run smoke tests
+        run: |
+          BACKEND_URL="https://staging-api.nueronote.com"
+          curl -sf $BACKEND_URL/health || exit 1
+          
+      - name: Notify Slack
+        uses: slackapi/slack-github-action@v1
+        with:
+          payload: |
+            {
+              "text": "NueroNote staging deployed successfully",
+              "blocks": [{
+                "type": "section",
+                "text": {
+                  "type": "mrkdwn",
+                  "text": "*NueroNote Staging Deployed*\nCommit: `${{ github.sha }}`\nBy: ${{ github.actor }}"
+                }
+              }]
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          SLACK_WEBHOOK_TYPE: INCOMING_WEBHOOK
+
+  # ============================================================
+  # Deploy to Production
+  # ============================================================
+  deploy-production:
+    runs-on: ubuntu-latest
+    environment: production
+    if: github.event_name == 'workflow_dispatch' && github.inputs.environment == 'production'
+    
+    steps:
+      - name: Checkout infrastructure repo
+        uses: actions/checkout@v4
+        with:
+          repository: trigoldsun/nueronote-ops
+          path: nueronote-ops
+          ref: main
+          
+      - name: Configure kubectl for ACK
+        uses: azure/k8s-set-context@v3
+        with:
+          kubeconfig: ${{ secrets.ACK_KUBECONFIG_PROD }}
+          
+      - name: Deploy backend with Kustomize
+        run: |
+          cd nueronote-ops/kubernetes/overlays/prod
+          kustomize build . | kubectl apply -f -
+          
+      - name: Wait for rollout
+        run: |
+          kubectl rollout status deployment/nueronote-backend -n nueronote-prod --timeout=300s
+          kubectl rollout status deployment/nueronote-frontend -n nueronote-prod --timeout=300s
+          
+      - name: Run production smoke tests
+        run: |
+          BACKEND_URL="https://api.nueronote.com"
+          FRONTEND_URL="https://app.nueronote.com"
+          
+          echo "Testing backend health..."
+          curl -sf $BACKEND_URL/health || { echo "Backend health check failed"; exit 1; }
+          
+          echo "Testing frontend..."
+          curl -sf $FRONTEND_URL/ | grep -q "<html" || { echo "Frontend check failed"; exit 1; }
+          
+      - name: Notify Slack
+        uses: slackapi/slack-github-action@v1
+        with:
+          payload: |
+            {
+              "text": "NueroNote production deployed successfully",
+              "blocks": [{
+                "type": "section",
+                "text": {
+                  "type": "mrkdwn",
+                  "text": "*NueroNote Production Deployed*\nCommit: `${{ github.sha }}`\nBy: ${{ github.actor }}"
+                }
+              }]
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          SLACK_WEBHOOK_TYPE: INCOMING_WEBHOOK
+
+  # ============================================================
+  # Rollback (on failure or manual trigger)
+  # ============================================================
+  rollback:
+    runs-on: ubuntu-latest
+    environment: production
+    if: github.event_name == 'workflow_dispatch' && github.inputs.environment == 'rollback'
+    
+    steps:
+      - name: Configure kubectl for ACK
+        uses: azure/k8s-set-context@v3
+        with:
+          kubeconfig: ${{ secrets.ACK_KUBECONFIG_PROD }}
+          
+      - name: Rollback deployment
+        run: |
+          kubectl rollout undo deployment/nueronote-backend -n nueronote-prod
+          kubectl rollout undo deployment/nueronote-frontend -n nueronote-prod
+          
+      - name: Verify rollback
+        run: |
+          kubectl rollout status deployment/nueronote-backend -n nueronote-prod --timeout=300s
+          kubectl rollout status deployment/nueronote-frontend -n nueronote-prod --timeout=300s
+          
+      - name: Notify Slack
+        uses: slackapi/slack-github-action@v1
+        with:
+          payload: |
+            {
+              "text": "NueroNote production rolled back",
+              "blocks": [{
+                "type": "section",
+                "text": {
+                  "type": "mrkdwn",
+                  "text": "*NueroNote Production Rolled Back*\nBy: ${{ github.actor }}"
+                }
+              }]
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          SLACK_WEBHOOK_TYPE: INCOMING_WEBHOOK

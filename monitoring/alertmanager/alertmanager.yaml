@@ -1,0 +1,104 @@
+# NueroNote AlertManager Configuration
+
+global:
+  resolve_timeout: 5m
+  smtp_smarthost: 'smtp.aliyun.com:465'
+  smtp_from: 'alerts@nueronote.com'
+  smtp_auth_username: 'alerts@nueronote.com'
+  
+route:
+  group_by: ['alertname', 'namespace', 'severity']
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+  receiver: 'default'
+  routes:
+    # 紧急告警 - 立即通知
+    - match:
+        severity: critical
+        team: ops
+      receiver: 'pagerduty'
+      group_wait: 0s
+      repeat_interval: 1h
+      
+    # 严重告警 - 钉钉通知
+    - match:
+        severity: critical
+      receiver: 'dingtalk-critical'
+      group_wait: 10s
+      
+    # 警告告警 - 邮件
+    - match:
+        severity: warning
+      receiver: 'email'
+      
+    # 按团队路由
+    - match:
+        team: backend
+      receiver: 'dingtalk-backend'
+    - match:
+        team: frontend
+      receiver: 'dingtalk-frontend'
+    - match:
+        team: ops
+      receiver: 'dingtalk-ops'
+
+receivers:
+  - name: 'default'
+    webhook_configs:
+      - url: 'http://alert-router:9099/router'
+        send_resolved: true
+        
+  - name: 'pagerduty'
+    pagerduty_configs:
+      - service_key: 'REPLACE_WITH_PAGERDUTY_KEY'
+        severity: critical
+        component: 'NueroNote'
+        group: 'infrastructure'
+        class: 'availability'
+        
+  - name: 'dingtalk-critical'
+    webhook_configs:
+      - url: 'http://dingtalk-webhook:8060/dingtalk/critical/send'
+        send_resolved: true
+        http_config:
+          timeout: 10s
+          
+  - name: 'dingtalk-backend'
+    webhook_configs:
+      - url: 'http://dingtalk-webhook:8060/dingtalk/backend/send'
+        send_resolved: true
+        
+  - name: 'dingtalk-frontend'
+    webhook_configs:
+      - url: 'http://dingtalk-webhook:8060/dingtalk/frontend/send'
+        send_resolved: true
+        
+  - name: 'dingtalk-ops'
+    webhook_configs:
+      - url: 'http://dingtalk-webhook:8060/dingtalk/ops/send'
+        send_resolved: true
+        
+  - name: 'email'
+    email_configs:
+      - to: 'alerts@nueronote.com'
+        send_resolved: true
+        headers:
+          subject: '[{{ .Status | toUpper }}] NueroNote Alert: {{ .GroupLabels.alertname }}'
+
+inhibit_rules:
+  # 当整个服务不可用时，抑制下层告警
+  - source_match:
+      alertname: 'NueroNoteAPIErrorRateHigh'
+      severity: 'critical'
+    target_match:
+      severity: 'warning'
+    equal: ['namespace', 'service']
+    
+  # 当数据库不可用时，抑制应用层告警
+  - source_match:
+      alertname: 'NueroNoteDatabaseDown'
+      severity: 'critical'
+    target_match:
+      severity: 'warning'
+    equal: ['namespace']

@@ -1,0 +1,27 @@
+# Kustomize base configuration for NueroNote
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: nueronote
+
+resources:
+  - namespace.yaml  # 4 namespaces
+  - backend.yaml
+  - frontend.yaml
+  - services.yaml
+  - hpa.yaml
+  - ingress.yaml
+  - networkpolicy.yaml
+  - quota.yaml
+  - config.yaml
+  - rbac.yaml
+
+commonLabels:
+  app: nueronote
+  managed-by: kustomize
+
+configMapGenerator:
+  - name: nueronote-config
+    behavior: merge
+    literals:
+      - LOG_LEVEL=info

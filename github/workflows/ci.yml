@@ -1,0 +1,271 @@
+# NueroNote CI Pipeline - GitHub Actions
+# Backend: Python Flask | Frontend: Vanilla HTML/JS (Static)
+
+name: CI Pipeline
+
+on:
+  push:
+    branches: [main, staging, develop]
+  pull_request:
+    branches: [main, staging, develop]
+
+env:
+  REGISTRY: registry.cn-shanghai.aliyuncs.com
+  IMAGE_BACKEND: nueronote/backend
+  IMAGE_FRONTEND: nueronote/frontend
+
+jobs:
+  # ============================================================
+  # Stage 1: Backend Python Code Quality
+  # ============================================================
+  lint-backend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: nueronote_server
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          
+      - name: Cache pip packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+            
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install flake8 bandit safety
+            
+      - name: Lint with flake8
+        run: |
+          flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics || true
+          flake8 . --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics || true
+          
+      - name: Security scan with Bandit
+        run: |
+          bandit -r . -f json || true
+          
+      - name: Check dependencies for vulnerabilities
+        run: |
+          safety check || true
+
+  # ============================================================
+  # Stage 2: Backend Python Tests
+  # ============================================================
+  test-backend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: nueronote_server
+    
+    services:
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_USER: nueronote
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: nueronote_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+          
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install pytest pytest-cov pytest-postgresql pytest-redis
+          
+      - name: Run tests
+        env:
+          DATABASE_URL: postgresql://nueronote:test@localhost:5432/nueronote_test
+          REDIS_URL: redis://localhost:6379/0
+          JWT_SECRET: test-jwt-secret
+          FLASK_SECRET: test-flask-secret
+        run: |
+          pytest --cov=nueronote_server --cov-report=xml --cov-report=html -v
+
+  # ============================================================
+  # Stage 3: Frontend Static Analysis
+  # ============================================================
+  lint-frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: nueronote_client
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Check HTML structure
+        run: |
+          # Basic HTML validation using grep
+          grep -l "<!DOCTYPE html>" *.html || echo "Warning: No DOCTYPE found"
+          grep -l "<html" *.html || echo "Warning: No html tag found"
+          
+      - name: Check for console.log in JS
+        run: |
+          if [ -f *.js ] 2>/dev/null; then
+            echo "Checking JS files for console.log..."
+            grep -r "console\.\(log\|debug\|info\)" . --include="*.js" || echo "No console statements found"
+          fi
+          
+      - name: Check for TODO/FIXME comments
+        run: |
+          grep -rn "TODO\|FIXME\|XXX" . --include="*.js" --include="*.html" || echo "No TODOs found"
+
+  # ============================================================
+  # Stage 4: Docker Image Build - Backend
+  # ============================================================
+  build-backend:
+    runs-on: ubuntu-latest
+    needs: [lint-backend, test-backend]
+    if: github.event_name == 'push'
+    
+    outputs:
+      backend_image: ${{ steps.meta.outputs.tags }}
+      
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        
+      - name: Log in to Alibaba Cloud Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ secrets.ACR_USERNAME }}
+          password: ${{ secrets.ACR_PASSWORD }}
+          
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_BACKEND }}
+          tags: |
+            type=sha,prefix=,suffix=,format=short
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+            type=raw,value=latest,enable={{is_default_branch}}
+            
+      - name: Build and push backend image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./nueronote_server
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          platforms: linux/amd64,linux/arm64
+
+  # ============================================================
+  # Stage 5: Docker Image Build - Frontend
+  # ============================================================
+  build-frontend:
+    runs-on: ubuntu-latest
+    needs: [lint-frontend]
+    if: github.event_name == 'push'
+    
+    outputs:
+      frontend_image: ${{ steps.meta.outputs.tags }}
+      
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        
+      - name: Log in to Alibaba Cloud Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ secrets.ACR_USERNAME }}
+          password: ${{ secrets.ACR_PASSWORD }}
+          
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_FRONTEND }}
+          tags: |
+            type=sha,prefix=,suffix=,format=short
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+            type=raw,value=latest,enable={{is_default_branch}}
+            
+      - name: Build and push frontend image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./nueronote_client
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          platforms: linux/amd64,linux/arm64
+
+  # ============================================================
+  # Stage 6: Security Scan with Trivy
+  # ============================================================
+  security-scan:
+    runs-on: ubuntu-latest
+    needs: [build-backend, build-frontend]
+    if: github.event_name == 'push'
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: '${{ env.REGISTRY }}/${{ env.IMAGE_BACKEND }}:${{ github.sha }}'
+          format: 'sarif'
+          output: 'trivy-results-backend.sarif'
+          severity: 'CRITICAL,HIGH'
+          
+      - name: Run Trivy on frontend
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: '${{ env.REGISTRY }}/${{ env.IMAGE_FRONTEND }}:${{ github.sha }}'
+          format: 'sarif'
+          output: 'trivy-results-frontend.sarif'
+          severity: 'CRITICAL,HIGH'
+          
+      - name: Upload Trivy results to Security tab
+        uses: github/codeql-action/upload-sarif@v2
+        with:
+          sarif_file: 'trivy-results-backend.sarif'
+          
+      - name: Upload Trivy results to Security tab
+        uses: github/codeql-action/upload-sarif@v2
+        with:
+          sarif_file: 'trivy-results-frontend.sarif'
